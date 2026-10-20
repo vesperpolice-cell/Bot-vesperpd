@@ -1,7 +1,7 @@
 import { Client, Events, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags, type ColorResolvable, Interaction, ButtonInteraction } from 'discord.js';
 import { configService } from '../../core/config.service';
 import { sheetService } from '../../core/sheet.service';
-import { registerMember, checkPreApproved, checkPendingStatus, checkInOutDc, findMemberByDiscordId } from './welcome.service';
+import { registerMember, checkPreApproved, checkPendingStatus, checkInOutDc, findMemberByDiscordId, LEFT_DISCORD_STATUS } from './welcome.service';
 import { getTextChannel } from '../../services/utils';
 import { logger } from '../../core/logger';
 
@@ -74,8 +74,8 @@ export function setupWelcomeFeature(client: Client): void {
                         const discordCell = (rows[i]?.[0] || '').trim();
                         if (discordCell.includes(member.user.id)) {
                             const rowNumber = i + 1;
-                            await sheetService.updateValues(reg.spreadsheetId, `${reg.sheetName}!N${rowNumber}`, [['ออกจาก Discord']]);
-                            logger.info('ต้อนรับ', `อัปเดตสถานะ GuildMemberRemove: แถว ${rowNumber} = ออกจาก Discord`);
+                            await sheetService.updateValues(reg.spreadsheetId, `${reg.sheetName}!N${rowNumber}`, [[LEFT_DISCORD_STATUS]]);
+                            logger.info('ต้อนรับ', `อัปเดตสถานะ GuildMemberRemove: แถว ${rowNumber} = ${LEFT_DISCORD_STATUS}`);
                             break;
                         }
                     }
@@ -109,7 +109,7 @@ export function setupWelcomeFeature(client: Client): void {
                     embeds: [buildWelcomeEmbedV2(
                         '#808080',
                         'ℹ️ ยินดีต้อนรับอีกครั้ง',
-                        `<@${member.user.id}> ยินดีต้อนรับสู่ Mahanakorn Diwa!\n⚠️ **คุณมีชื่อในระบบที่ถูกถอดออกแล้ว** กรุณาติดต่อ Admin หากต้องการกลับเข้ามาทำงาน`,
+                        `<@${member.user.id}> ยินดีต้อนรับสู่ Vesper PD!\n⚠️ **คุณมีชื่อในระบบที่ถูกถอดออกแล้ว** กรุณาติดต่อ Admin หากต้องการกลับเข้ามาทำงาน`,
                         member.user.id,
                         member.user.displayAvatarURL(),
                         member.guild.memberCount,
@@ -133,12 +133,12 @@ export function setupWelcomeFeature(client: Client): void {
                     await ch.send({
                         embeds: [buildWelcomeEmbedV2(
                             '#3aca1d',
-                            '🎉 ยินดีต้อนรับสู่ Mahanakorn Diwa!',
-                            `ยินดีต้อนรับ <@${member.user.id}> สู่ Mahanakorn Diwa!\n📛 **ชื่อในระบบ:** \`${result.nickname}\``,
+                            '🎉 ยินดีต้อนรับสู่ Vesper PD!',
+                            `ยินดีต้อนรับ <@${member.user.id}> สู่ Vesper PD!\n📛 **ชื่อในระบบ:** \`${result.nickname}\``,
                             member.user.id,
                             member.user.displayAvatarURL(),
                             member.guild.memberCount,
-                            'MHNK Police Department • ยินดีต้อนรับ'
+                            'VES-PD • ยินดีต้อนรับ'
                         )]
                     });
 
@@ -161,7 +161,7 @@ export function setupWelcomeFeature(client: Client): void {
                         embeds: [buildWelcomeEmbedV2(
                             '#FFA500',
                             '⚠️ ยินดีต้อนรับ — ไม่สามารถลงทะเบียนอัตโนมัติ',
-                            `<@${member.user.id}> ยินดีต้อนรับสู่ Mahanakorn Diwa!\n❌ ไม่สามารถลงทะเบียนให้คุณได้ (อาจซ้ำหรือข้อมูลไม่ถูกต้อง) กรุณาติดต่อ Admin`,
+                            `<@${member.user.id}> ยินดีต้อนรับสู่ Vesper PD!\n❌ ไม่สามารถลงทะเบียนให้คุณได้ (อาจซ้ำหรือข้อมูลไม่ถูกต้อง) กรุณาติดต่อ Admin`,
                             member.user.id,
                             member.user.displayAvatarURL(),
                             member.guild.memberCount,
@@ -176,8 +176,8 @@ export function setupWelcomeFeature(client: Client): void {
                 await ch.send({
                     embeds: [buildWelcomeEmbedV2(
                         '#3aca1d',
-                        '🎉 ยินดีต้อนรับสู่ Mahanakorn Diwa!',
-                        `ยินดีต้อนรับ <@${member.user.id}> สู่ Mahanakorn Diwa!\n📌 กรุณากรอกใบสมัครที่หน้าเว็บไซต์เพื่อสมัครเป็นตำรวจ\n💡 หากสมัครแล้ว กดปุ่มด้านล่างเพื่อตรวจสอบสถานะ`,
+                        '🎉 ยินดีต้อนรับสู่ Vesper PD!',
+                        `ยินดีต้อนรับ <@${member.user.id}> สู่ Vesper PD!\n📌 กรุณากรอกใบสมัครที่หน้าเว็บไซต์เพื่อสมัครเป็นตำรวจ\n💡 หากสมัครแล้ว กดปุ่มด้านล่างเพื่อตรวจสอบสถานะ`,
                         member.user.id,
                         member.user.displayAvatarURL(),
                         member.guild.memberCount,

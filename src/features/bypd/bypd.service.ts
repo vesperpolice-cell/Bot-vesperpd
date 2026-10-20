@@ -78,7 +78,7 @@ async function resolveTags(guild: Guild, content: string): Promise<string[]> {
     const allCodes = [...new Set([...bypdCodes, ...pdCodes])];
 
     const resolveOne = async (code: string): Promise<string> => {
-        const prefix = `${code} [MHNK-PD]`;
+        const prefix = `${code} [VES-PD]`;
 
         // 1. เช็ค cache ก่อน
         const cached = tagCache.get(code);

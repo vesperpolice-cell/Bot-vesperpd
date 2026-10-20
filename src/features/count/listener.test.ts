@@ -131,7 +131,7 @@ describe('looksLikeDiscordId — กันเลขปลอมไม่ให�
 });
 
 describe('resolveName — ไล่หาชื่อ 3 ทาง', () => {
-    const NAME = { nickname: '30 [MHNK-PD] Ralph Shelby', username: 'ralph' };
+    const NAME = { nickname: '30 [VES-PD] Ralph Shelby', username: 'ralph' };
     const ALT = { nickname: 'ralph', username: 'ralph' };
 
     /** นับว่าแต่ละทางถูกเรียกกี่ครั้ง เพื่อยืนยันว่าไม่ยิง Discord เกินจำเป็น */

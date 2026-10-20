@@ -16,6 +16,14 @@ export interface RegistrySlot {
 }
 
 /**
+ * สถานะที่บอทเขียนลงคอลัมน์ N ตอนคนออกจากเซิร์ฟเวอร์
+ *
+ * ตัวเดียวกับที่ listener เขียนและที่ registerMember อ่านเพื่อรู้ว่าใคร "กลับมา"
+ * ถ้าแยกเป็นข้อความสองที่เมื่อไหร่ การกลับเข้ามาจะพังเงียบ ๆ ทันที
+ */
+export const LEFT_DISCORD_STATUS = 'ออกจาก Discord';
+
+/**
  * หาแถวแรกที่ "มีรหัสประจำตัวแล้ว แต่ยังไม่มีชื่อ" = ที่ว่างสำหรับคนใหม่
  *
  * rows มาจาก range C:D → index 0 = คอลัมน์ C (รหัส), index 1 = คอลัมน์ D (ชื่อ)
@@ -41,6 +49,26 @@ export function findDynamicRegistrySlot(dyn: string[][], scannedRowCount: number
         if (dyn[j][0]) {
             return { row: scannedRowCount + j + 1, code: dyn[j][0].trim() };
         }
+    }
+    return null;
+}
+
+/**
+ * แถวของคนที่เคยลงทะเบียนไว้ แล้วออกจาก Discord ไป — ให้กลับมาใช้แถวเดิมได้
+ *
+ * rows มาจาก range C:N → index 0 = C (รหัส), 2 = E (mention), 11 = N (สถานะ)
+ * เริ่มที่ index 2 ด้วยเหตุผลเดียวกับ findEmptyRegistrySlot: สองแถวแรกเป็นหัวตาราง
+ *
+ * ต้องครบทั้งสามเงื่อนไข — มีรหัส, เป็น Discord ID คนนี้, และสถานะบอกว่าออกไปแล้ว
+ * ถ้าไม่เช็คสถานะด้วย คนที่ยังอยู่ในกรมจะถูกนับเป็น "กลับมา" แล้วถูกเขียนทับชื่อตัวเอง
+ */
+export function findRejoinableRow(rows: string[][], userId: string): RegistrySlot | null {
+    for (let i = 2; i < rows.length; i++) {
+        const row = rows[i];
+        if (!row?.[0]) continue;
+        if (!(row[2] || '').includes(userId)) continue;
+        if ((row[11] || '').trim() !== LEFT_DISCORD_STATUS) continue;
+        return { row: i + 1, code: row[0].trim() };
     }
     return null;
 }
@@ -172,23 +200,26 @@ export async function isAlreadyRegistered(userId: string, bypassCache = false): 
 
 export async function registerMember(icName: string, userId: string, icPhone = ''): Promise<{ nickname: string; wasTruncated: boolean } | null> {
     return locks.sheetMutation.run(async () => {
-        if (await isAlreadyRegistered(userId, false)) {
-            logger.warn('สมัคร', `ผู้ใช้ ${userId} พยายามสมัครซ้ำ (pre-check)`);
-            return null;
-        }
-
         try {
             const reg = configService.getRegistryConfig();
             if (!reg.spreadsheetId || !reg.sheetName) return null;
 
-            const already = await isAlreadyRegistered(userId, true);
-            if (already) {
-                logger.warn('สมัคร', `ผู้ใช้ ${userId} สมัครซ้ำ (ตรวจพบใน Queue) — ข้าม`);
+            const rows = await sheetService.getValues(reg.spreadsheetId, `${reg.sheetName}!C:N`, 0);
+
+            /* คนเก่าที่ออกจาก Discord แล้วกลับเข้ามา ได้แถวและรหัสเดิมคืน
+               ต้องตัดสินก่อนเช็คสมัครซ้ำ เพราะ Discord ID ของเขายังอยู่ในคอลัมน์ E
+               ของแถวนั้น — ด่านซ้ำจึงปฏิเสธเขาทุกครั้งถ้าถามทีหลัง */
+            const rejoin = findRejoinableRow(rows, userId);
+
+            if (!rejoin && await isAlreadyRegistered(userId, true)) {
+                logger.warn('สมัคร', `ผู้ใช้ ${userId} สมัครซ้ำ — ข้าม`);
                 return null;
             }
 
-            const rows = await sheetService.getValues(reg.spreadsheetId, `${reg.sheetName}!C:D`, 0);
-            let slot = findEmptyRegistrySlot(rows);
+            let slot = rejoin;
+            if (!slot) {
+                slot = findEmptyRegistrySlot(rows);
+            }
 
             if (!slot) {
                 const dyn = await sheetService.getValues(reg.spreadsheetId, `${reg.sheetName}!C${rows.length + 1}:C${rows.length + 20}`, 0);
@@ -204,11 +235,17 @@ export async function registerMember(icName: string, userId: string, icPhone = '
             const truncatedNick = truncateNickname(fullNickname);
             const formattedDate = formatRegistrationDate(new Date());
 
-            await sheetService.batchUpdateValues(
-                reg.spreadsheetId,
-                buildRegistrationUpdates(reg.sheetName, slot.row, icPhone, truncatedNick, userId, formattedDate),
-            );
-            logger.info('สมัคร', `ลงทะเบียน ${fullNickname} เบอร์ ${icPhone} แถว ${slot.row}`);
+            const updates = buildRegistrationUpdates(reg.sheetName, slot.row, icPhone, truncatedNick, userId, formattedDate);
+            /* ล้างสถานะทิ้ง ไม่งั้นแถวยังประกาศว่า "ออกจาก Discord" ทั้งที่เจ้าตัวกลับมาแล้ว
+               และจะถูกนับเป็นคนกลับมาซ้ำได้อีกเรื่อย ๆ */
+            if (rejoin) {
+                updates.push({ range: `${reg.sheetName}!N${slot.row}`, values: [['']] });
+            }
+
+            await sheetService.batchUpdateValues(reg.spreadsheetId, updates);
+            logger.info('สมัคร', rejoin
+                ? `กลับเข้า Discord ${fullNickname} ใช้รหัสเดิม แถว ${slot.row}`
+                : `ลงทะเบียน ${fullNickname} เบอร์ ${icPhone} แถว ${slot.row}`);
             return { nickname: truncatedNick, wasTruncated: fullNickname.length > 32 };
 
         } catch (error) {

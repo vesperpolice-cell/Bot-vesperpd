@@ -47,9 +47,9 @@ describe('findRow', () => {
     const mockRows = [
         [],
         [],
-        ['001 [MHNK-PD] John', '', '', '', '', '', '', '', '', ''],         // index 2 (row 3)
-        ['002 [MHNK-PD] Alice', '', '', '', '', '', '', '', '', 'steam:alice'], // index 3 (row 4) — has M (steam)
-        ['003 [MHNK-PD] Bob', '', '', '', '', '', '', '', '', ''],              // index 4 (row 5)
+        ['001 [VES-PD] John', '', '', '', '', '', '', '', '', ''],         // index 2 (row 3)
+        ['002 [VES-PD] Alice', '', '', '', '', '', '', '', '', 'steam:alice'], // index 3 (row 4) — has M (steam)
+        ['003 [VES-PD] Bob', '', '', '', '', '', '', '', '', ''],              // index 4 (row 5)
         ['', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', 'Outsider', 'steam:outsider'], // index 5 (row 6) — has X+Y
     ];
 
@@ -86,7 +86,7 @@ describe('findRow', () => {
         const shortRows = [
             [],
             [],
-            ['001 [MHNK-PD] Jo', '', '', '', '', '', '', '', '', ''],
+            ['001 [VES-PD] Jo', '', '', '', '', '', '', '', '', ''],
         ];
         const result = findRow(shortRows, 'John');
         expect(result.action).toBe('update_time_steam');

@@ -4,7 +4,7 @@ export function findMembersByCode(guild: Guild, codes: string[]): { found: Guild
     const found: GuildMember[] = [];
     const notFound: string[] = [];
     for (const code of codes) {
-        const prefix = `${code} [MHNK-PD]`;
+        const prefix = `${code} [VES-PD]`;
         const matches = guild.members.cache.filter(m => (m.nickname || '').startsWith(prefix));
         if (matches.size > 0) {
             for (const [, m] of matches) {
@@ -19,7 +19,7 @@ export function findMembersByCode(guild: Guild, codes: string[]): { found: Guild
 
 export function truncateNickname(fullName: string, maxLen = 32): string {
     if (fullName.length <= maxLen) return fullName;
-    const prefixMatch = fullName.match(/^(.+? \[MHNK-PD\] )/);
+    const prefixMatch = fullName.match(/^(.+? \[VES-PD\] )/);
     if (prefixMatch) {
         const prefix = prefixMatch[1];
         const icPart = fullName.slice(prefix.length);
@@ -30,5 +30,5 @@ export function truncateNickname(fullName: string, maxLen = 32): string {
 }
 
 export function makeFullName(codeNumber: string, icName: string): string {
-    return `${codeNumber} [MHNK-PD] ${icName}`;
+    return `${codeNumber} [VES-PD] ${icName}`;
 }

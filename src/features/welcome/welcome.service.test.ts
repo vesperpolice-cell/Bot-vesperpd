@@ -26,6 +26,7 @@ import {
     formatRegistrationDate,
     buildRegistrationUpdates,
     columnContainsUserId,
+    findRejoinableRow,
     findRegistryRowByDiscordId,
     findPendingEntry,
     registerMember,
@@ -125,6 +126,45 @@ describe('findDynamicRegistrySlot — ที่ว่างจากช่วง
     });
 });
 
+describe('findRejoinableRow — คนเก่าที่ออกจาก Discord แล้วกลับมา', () => {
+    /** แถวเต็ม C:N — index 0 = C (รหัส), 2 = E (mention), 11 = N (สถานะ) */
+    const row = (code: string, name: string, mention: string, status = '') => {
+        const r = new Array(12).fill('');
+        r[0] = code; r[1] = name; r[2] = mention; r[11] = status;
+        return r;
+    };
+
+    it('เจอแถวที่ ID ตรงกันและสถานะบอกว่าออกจาก Discord', () => {
+        const rows = [[], [], row('101', 'สมชาย', '<@111>'), row('102', 'สมหญิง', '<@222>', 'ออกจาก Discord')];
+        expect(findRejoinableRow(rows, '222')).toEqual({ row: 4, code: '102' });
+    });
+
+    it('ยังอยู่ในกรม (สถานะว่าง) → ไม่ใช่คนกลับมา จะได้ไม่ถูกเขียนทับชื่อตัวเอง', () => {
+        const rows = [[], [], row('101', 'สมชาย', '<@111>')];
+        expect(findRejoinableRow(rows, '111')).toBeNull();
+    });
+
+    it('สถานะเป็นเหตุผลออกแบบอื่น → ไม่ให้กลับมาเอง ต้องผ่านแอดมิน', () => {
+        const rows = [[], [], row('101', 'สมชาย', '<@111>', 'ถูกปลดออก')];
+        expect(findRejoinableRow(rows, '111')).toBeNull();
+    });
+
+    it('คนละ ID → ไม่คืนแถวของคนอื่น', () => {
+        const rows = [[], [], row('101', 'สมชาย', '<@111>', 'ออกจาก Discord')];
+        expect(findRejoinableRow(rows, '999')).toBeNull();
+    });
+
+    it('ข้ามสองแถวแรกที่เป็นหัวตาราง', () => {
+        const rows = [row('C', 'D', '<@111>', 'ออกจาก Discord'), row('x', 'y', '<@111>', 'ออกจาก Discord')];
+        expect(findRejoinableRow(rows, '111')).toBeNull();
+    });
+
+    it('แถวไม่มีรหัส → ข้าม ถึงจะมี ID กับสถานะตรงก็ตาม', () => {
+        const rows = [[], [], row('', 'สมชาย', '<@111>', 'ออกจาก Discord')];
+        expect(findRejoinableRow(rows, '111')).toBeNull();
+    });
+});
+
 describe('formatRegistrationDate — วันที่แบบที่ชีตใช้', () => {
     it('ไม่เติมศูนย์นำหน้า', () => {
         expect(formatRegistrationDate(new Date(2026, 2, 5))).toBe('5/3/2026');
@@ -140,7 +180,7 @@ describe('formatRegistrationDate — วันที่แบบที่ชี�
 });
 
 describe('buildRegistrationUpdates — เขียนลงช่องไหน', () => {
-    const updates = buildRegistrationUpdates('NamePD', 7, '555-1234', '102 [MHNK-PD] สมหญิง', '123456789012345678', '28/9/2026');
+    const updates = buildRegistrationUpdates('NamePD', 7, '555-1234', '102 [VES-PD] สมหญิง', '123456789012345678', '28/9/2026');
 
     it('เขียน 3 ช่วงเท่านั้น ไม่มากไม่น้อย', () => {
         expect(updates).toHaveLength(3);
@@ -152,7 +192,7 @@ describe('buildRegistrationUpdates — เขียนลงช่องไห�
 
     it('ชื่อลง D และ mention ลง E ในครั้งเดียว', () => {
         expect(updates[1].range).toBe('NamePD!D7:E7');
-        expect(updates[1].values[0][0]).toBe('102 [MHNK-PD] สมหญิง');
+        expect(updates[1].values[0][0]).toBe('102 [VES-PD] สมหญิง');
     });
 
     it('mention ต้องมี \' นำหน้า ไม่งั้น Google ตีความเป็นสูตร', () => {
@@ -265,26 +305,26 @@ describe('registerMember — ลงทะเบียนจริงตั้ง
     it('เขียนเบอร์ / ชื่อ / mention / วันที่ ลงแถวที่ถูกต้อง', async () => {
         sheetData({
             'NamePD!E:E': [['<@999999999999999999>']],
-            'NamePD!C:D': [[], [], ['101', 'สมชาย'], ['102', '']],
+            'NamePD!C:N': [[], [], ['101', 'สมชาย'], ['102', '']],
         });
 
         const result = await registerMember('สมหญิง', '123456789012345678', '555-1234');
 
-        expect(result).toEqual({ nickname: '102 [MHNK-PD] สมหญิง', wasTruncated: false });
+        expect(result).toEqual({ nickname: '102 [VES-PD] สมหญิง', wasTruncated: false });
         expect(batchUpdate).toHaveBeenCalledTimes(1);
 
         const [spreadsheetId, updates] = batchUpdate.mock.calls[0];
         expect(spreadsheetId).toBe('reg-1');
         expect(updates[0]).toEqual({ range: 'NamePD!B4', values: [['555-1234']] });
         expect(updates[1].range).toBe('NamePD!D4:E4');
-        expect(updates[1].values[0]).toEqual(['102 [MHNK-PD] สมหญิง', "'<@123456789012345678>"]);
+        expect(updates[1].values[0]).toEqual(['102 [VES-PD] สมหญิง', "'<@123456789012345678>"]);
         expect(updates[2]).toEqual({ range: 'NamePD!H4', values: [[formatRegistrationDate(new Date())]] });
     });
 
     it('สมัครซ้ำ → ไม่เขียนอะไรลงชีตเลย', async () => {
         sheetData({
             'NamePD!E:E': [['<@123456789012345678>']],
-            'NamePD!C:D': [[], [], ['102', '']],
+            'NamePD!C:N': [[], [], ['102', '']],
         });
 
         expect(await registerMember('สมหญิง', '123456789012345678', '555')).toBeNull();
@@ -296,7 +336,7 @@ describe('registerMember — ลงทะเบียนจริงตั้ง
         sheetData({
             'NamePD!E:E': [],
             'OutDC!E:E': [['<@123456789012345678>']],
-            'NamePD!C:D': [[], [], ['102', '']],
+            'NamePD!C:N': [[], [], ['102', '']],
         });
 
         expect(await registerMember('สมหญิง', '123456789012345678', '555')).toBeNull();
@@ -306,7 +346,7 @@ describe('registerMember — ลงทะเบียนจริงตั้ง
     it('ไม่มีแถวว่างที่มีรหัส → ไม่เขียน และคืน null', async () => {
         sheetData({
             'NamePD!E:E': [],
-            'NamePD!C:D': [[], [], ['101', 'สมชาย'], ['102', 'สมหญิง']],
+            'NamePD!C:N': [[], [], ['101', 'สมชาย'], ['102', 'สมหญิง']],
         });
 
         expect(await registerMember('สมศักดิ์', '123456789012345678', '555')).toBeNull();
@@ -316,20 +356,20 @@ describe('registerMember — ลงทะเบียนจริงตั้ง
     it('C:D ไม่มีที่ว่าง → ต้องอ่านช่วงต่อท้ายแล้วใช้แถวนั้น', async () => {
         sheetData({
             'NamePD!E:E': [],
-            'NamePD!C:D': [[], [], ['101', 'สมชาย']],   // 3 แถว เต็มหมด
+            'NamePD!C:N': [[], [], ['101', 'สมชาย']],   // 3 แถว เต็มหมด
             'NamePD!C4:C23': [['104']],                  // รหัสถูกเติมไว้เกินช่วงแรก
         });
 
         const result = await registerMember('สมปอง', '123456789012345678', '555');
 
-        expect(result?.nickname).toBe('104 [MHNK-PD] สมปอง');
+        expect(result?.nickname).toBe('104 [VES-PD] สมปอง');
         expect(batchUpdate.mock.calls[0][1][0].range).toBe('NamePD!B4');
     });
 
     it('ชื่อยาวเกิน 32 ตัว → ตัดให้พอดี และบอกว่าถูกตัด', async () => {
         sheetData({
             'NamePD!E:E': [],
-            'NamePD!C:D': [[], [], ['102', '']],
+            'NamePD!C:N': [[], [], ['102', '']],
         });
 
         const longName = 'สมหญิงศรีสวัสดิ์วัฒนาพงศ์เจริญรุ่งเรืองยิ่ง';
@@ -351,17 +391,61 @@ describe('registerMember — ลงทะเบียนจริงตั้ง
     it('เขียนชีตไม่สำเร็จ → คืน null ไม่โยน error ออกมาให้บอทล้ม', async () => {
         sheetData({
             'NamePD!E:E': [],
-            'NamePD!C:D': [[], [], ['102', '']],
+            'NamePD!C:N': [[], [], ['102', '']],
         });
         batchUpdate.mockRejectedValue(new Error('โควต้าเต็ม'));
 
         await expect(registerMember('สมหญิง', '123456789012345678', '555')).resolves.toBeNull();
     });
 
+    it('ออกจาก Discord แล้วกลับมา → ได้แถวและรหัสเดิมคืน ไม่ใช่ "สมัครซ้ำ"', async () => {
+        const left = new Array(12).fill('');
+        left[0] = '00'; left[1] = '00 [VES-PD] vesperpolice'; left[2] = '<@123456789012345678>'; left[11] = 'ออกจาก Discord';
+        sheetData({
+            // ID ยังอยู่ในคอลัมน์ E ของแถวเดิม — ด่านสมัครซ้ำต้องไม่ปฏิเสธเขา
+            'NamePD!E:E': [[], [], ['<@123456789012345678>']],
+            'NamePD!C:N': [[], [], left, ['01', '']],
+        });
+
+        const result = await registerMember('vesperpolice', '123456789012345678', '78096');
+
+        // รหัส 00 เดิม ไม่ใช่ 01 ที่เป็นช่องว่างถัดไป
+        expect(result?.nickname).toBe('00 [VES-PD] vesperpolice');
+        const updates = batchUpdate.mock.calls[0][1];
+        expect(updates[0].range).toBe('NamePD!B3');
+        expect(updates[1].range).toBe('NamePD!D3:E3');
+    });
+
+    it('กลับเข้ามาแล้วต้องล้างสถานะ N ทิ้ง ไม่ให้แถวยังบอกว่าออกไปแล้ว', async () => {
+        const left = new Array(12).fill('');
+        left[0] = '00'; left[2] = '<@123456789012345678>'; left[11] = 'ออกจาก Discord';
+        sheetData({
+            'NamePD!E:E': [[], [], ['<@123456789012345678>']],
+            'NamePD!C:N': [[], [], left],
+        });
+
+        await registerMember('vesperpolice', '123456789012345678', '78096');
+
+        const updates = batchUpdate.mock.calls[0][1];
+        expect(updates).toContainEqual({ range: 'NamePD!N3', values: [['']] });
+    });
+
+    it('คนใหม่ปกติ → ไม่ไปยุ่งกับคอลัมน์ N ของแถวนั้น', async () => {
+        sheetData({
+            'NamePD!E:E': [],
+            'NamePD!C:N': [[], [], ['102', '']],
+        });
+
+        await registerMember('สมหญิง', '123456789012345678', '555');
+
+        const updates = batchUpdate.mock.calls[0][1];
+        expect(updates.some((u: { range: string }) => u.range.includes('!N'))).toBe(false);
+    });
+
     it('ไม่ใส่เบอร์โทร → เขียนช่องว่างลง B ไม่ใช่ undefined', async () => {
         sheetData({
             'NamePD!E:E': [],
-            'NamePD!C:D': [[], [], ['102', '']],
+            'NamePD!C:N': [[], [], ['102', '']],
         });
 
         await registerMember('สมหญิง', '123456789012345678');

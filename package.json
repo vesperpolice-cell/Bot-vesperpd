@@ -1,7 +1,7 @@
 {
-  "name": "mhnk-pd-0.2",
+  "name": "ves-pd-bot",
   "version": "2.0.0",
-  "description": "Mahanakorn PD Discord Bot v2",
+  "description": "Vesper PD Discord Bot v2",
   "main": "dist/index.js",
   "scripts": {
     "dev": "tsx watch src/index.ts",

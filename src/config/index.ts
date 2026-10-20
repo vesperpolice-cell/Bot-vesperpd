@@ -87,7 +87,7 @@ export const env = {
 
 // ---- Google Sheet IDs (same as original) ----
 export const SHEETS = {
-    CONFIG_SHEET_ID: '1YV_BIFiilxUM9XrW1cSYZTOgne1JnKoCXtRw7PUCCGs',
+    CONFIG_SHEET_ID: '1TEAXp_nIblYgKMIl9-TmlwiLhjL19KCZAuf8N64spwI',
     CONFIG_SHEET_NAME: 'config',
     /**
      * แท็บเก็บ log ของบอท อยู่ไฟล์ Settings เดียวกับ config

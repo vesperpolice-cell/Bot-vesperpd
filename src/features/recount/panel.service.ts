@@ -11,7 +11,7 @@ export function createPanelEmbed(): EmbedBuilder {
 
     return new EmbedBuilder()
         .setColor('#f4c430')
-        .setTitle('⚙️ แผงควบคุม Mahanakorn Bot')
+        .setTitle('⚙️ แผงควบคุม VES-PD Bot')
         .setDescription(
             '**นับเคส**\n' +
             `• Sheet ID: \`${count.SPREADSHEET_ID || 'ยังไม่ตั้ง'}\`\n` +
