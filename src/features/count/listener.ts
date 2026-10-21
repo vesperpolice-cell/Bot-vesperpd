@@ -5,6 +5,7 @@ import { processCountBatch, pendingCountOps } from './count.service';
 import { logger } from '../../core/logger';
 import { CACHE, COUNT } from '../../config';
 import type { TagInfo } from '../../types/discord';
+import { displayNameOf, forgetName, lookupName, pruneNameCache } from '../../services/name-resolver';
 
 /**
  * จำว่าโพสไหนนับให้ใครไปแล้ว — เก็บเฉพาะ "รหัสคน" ไม่เก็บชื่อเล่น
@@ -67,43 +68,6 @@ export function formatAge(ms: number): string {
     return `${Math.floor(mins / 60)} ชม. ${mins % 60} นาที`;
 }
 
-export interface ResolvedName {
-    nickname: string;
-    username: string;
-}
-
-/** หาชื่อไม่ได้เลย — ตัวเรียกต้องนับยอดให้อยู่ดี ห้ามทิ้งยอดเพราะไม่รู้ชื่อ */
-export const UNKNOWN_NAME: ResolvedName = { nickname: '', username: '' };
-
-/** ที่มาของชื่อ 3 ทาง เรียงจากถูกสุดไปแพงสุด */
-export interface NameSource {
-    /** 1) สมุดรายชื่อในเครื่อง — ฟรี ทันที แต่พร่องได้ */
-    local(id: string): ResolvedName | null;
-    /** 2) ถาม Discord เรื่องสมาชิกในเซิร์ฟ — ได้ชื่อเล่นที่มีรหัสหน้าชื่อ */
-    member(id: string): Promise<ResolvedName | null>;
-    /** 3) ถาม Discord เรื่องบัญชีผู้ใช้ — ใช้ได้แม้คนนั้นออกจากเซิร์ฟไปแล้ว */
-    user(id: string): Promise<ResolvedName | null>;
-}
-
-/**
- * ไล่หาชื่อจากเลขไอดี: สมุดในเครื่อง → ถาม Discord เรื่องสมาชิก → ถาม Discord เรื่องบัญชี
- *
- * ปุ่ม "นับข้อความเก่า" ถาม Discord ตรง ๆ อยู่แล้ว แต่การนับสดเดิมดูแค่สมุดในเครื่อง
- * ทำให้สองทางได้ชื่อไม่เท่ากัน — ตรงนี้ทำให้เหมือนกัน
- *
- * หาไม่ได้ทั้ง 3 ทางก็คืนค่าว่าง แล้วไปใส่เลขไอดีไว้ในช่องชื่อ (ดู ensureUserRow)
- * สิ่งที่ห้ามเกิดคือ "ไม่รู้ชื่อแล้วไม่นับยอด"
- */
-export async function resolveName(src: NameSource, id: string): Promise<ResolvedName> {
-    const fromLocal = src.local(id);
-    if (fromLocal) return fromLocal;
-    const fromMember = await src.member(id);
-    if (fromMember) return fromMember;
-    const fromUser = await src.user(id);
-    if (fromUser) return fromUser;
-    return UNKNOWN_NAME;
-}
-
 /**
  * เลขที่ดึงมาจาก <@...> หน้าตาเป็น Discord ID จริงไหม (ตัวเลขล้วน 17–20 หลัก)
  *
@@ -113,47 +77,6 @@ export async function resolveName(src: NameSource, id: string): Promise<Resolved
  */
 export function looksLikeDiscordId(id: string): boolean {
     return /^\d{17,20}$/.test(id);
-}
-
-/** จำชื่อที่หามาได้ไว้ชั่วคราว — value = null คือเคยถามแล้วไม่ได้ */
-const nameCache = new Map<string, { value: ResolvedName | null; expires: number }>();
-
-function displayNameOf(m: { nickname: string | null; displayName: string; user: { username: string } }): ResolvedName {
-    return {
-        nickname: (m.nickname || m.displayName || m.user.username).trim(),
-        username: m.user.username,
-    };
-}
-
-function nameSourceFor(guild: Guild): NameSource {
-    return {
-        local: (id) => {
-            const m = guild.members.cache.get(id);
-            return m ? displayNameOf(m) : null;
-        },
-        member: async (id) => {
-            const m = await guild.members.fetch(id).catch(() => null);
-            return m ? displayNameOf(m) : null;
-        },
-        user: async (id) => {
-            const u = await guild.client.users.fetch(id).catch(() => null);
-            return u ? { nickname: u.username.trim(), username: u.username } : null;
-        },
-    };
-}
-
-/** หาชื่อพร้อมจำผลไว้ กันถามซ้ำคนเดิมทุกข้อความ */
-async function lookupName(guild: Guild, id: string): Promise<ResolvedName> {
-    const hit = nameCache.get(id);
-    if (hit && Date.now() < hit.expires) return hit.value ?? UNKNOWN_NAME;
-
-    const found = await resolveName(nameSourceFor(guild), id);
-    const ok = Boolean(found.nickname || found.username);
-    nameCache.set(id, {
-        value: ok ? found : null,
-        expires: Date.now() + (ok ? COUNT.NAME_CACHE_TTL_MS : COUNT.NAME_MISS_TTL_MS),
-    });
-    return found;
 }
 
 /** แท็กที่หาชื่อไม่ได้เลยทั้ง 3 ทาง — ยังนับยอดให้ตามปกติ แค่จดไว้ว่าไม่รู้ชื่อ */
@@ -196,8 +119,7 @@ function logSummary(): void {
     warnedUnnamed.clear();
 
     // เก็บกวาดชื่อที่หมดอายุ ไม่ให้ค้างในหน่วยความจำไปเรื่อย ๆ
-    const now = Date.now();
-    for (const [id, entry] of nameCache) if (now >= entry.expires) nameCache.delete(id);
+    pruneNameCache();
 }
 
 /**
@@ -226,7 +148,7 @@ async function getTagsFromMessage(content: string, guild: Guild): Promise<TagInf
         }
         const name = await lookupName(guild, id);
         if (!name.nickname && !name.username) noteUnnamedTag(id);
-        tags.push({ id, nickname: name.nickname, username: name.username });
+        tags.push({ id, nickname: name.nickname, username: name.username, hasGuildNickname: name.hasGuildNickname });
     }
     return tags;
 }
@@ -289,10 +211,13 @@ export function planEdit(known: string[] | undefined, contentReadable: boolean, 
 function toRemovedTags(ids: string[], guild: Guild): TagInfo[] {
     return ids.map(id => {
         const member = guild.members.cache.get(id);
+        // ใช้ตัวเดียวกับฝั่งนับเพิ่ม เพื่อให้ธง hasGuildNickname มีความหมายเหมือนกันทั้งสองทาง
+        const name = member ? displayNameOf(member) : null;
         return {
             id,
-            nickname: member ? (member.nickname || member.displayName || member.user.username).trim() : '',
-            username: member ? member.user.username : '',
+            nickname: name?.nickname ?? '',
+            username: name?.username ?? '',
+            hasGuildNickname: name?.hasGuildNickname ?? false,
         };
     });
 }
@@ -312,6 +237,18 @@ export function setupCountFeature(client: Client): void {
         } catch (e: unknown) {
             logger.error('นับเคส', `แคชผิดพลาด: ${e instanceof Error ? e.message : String(e)}`);
         }
+    });
+
+    /*
+     * ชื่อเล่นเปลี่ยน → ลืมชื่อที่จำไว้ทันที
+     *
+     * ไม่มีตัวนี้ก็ต้องรอ cache หมดอายุ (30 นาที) ชื่อในชีตจึงจะตามความจริง
+     * คนเพิ่งลงทะเบียนเสร็จแล้วรับคดีต่อเลยเป็นเรื่องปกติ — ครึ่งชั่วโมงนานเกินไป
+     */
+    client.on(Events.GuildMemberUpdate, (oldM, newM) => {
+        if (oldM.nickname === newM.nickname) return;
+        forgetName(newM.id);
+        logger.info('นับเคส', `ชื่อเล่นเปลี่ยน: ${oldM.nickname ?? '(ไม่มี)'} → ${newM.nickname ?? '(ไม่มี)'} — ชื่อในชีตจะอัปเดตตอนได้ยอดครั้งถัดไป`);
     });
 
     client.on(Events.MessageCreate, async (message) => {

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { diffTags, formatAge, planEdit, looksLikeDiscordId, resolveName, claimForCount, UNKNOWN_NAME, type NameSource } from './listener';
+import { diffTags, formatAge, planEdit, looksLikeDiscordId, claimForCount } from './listener';
 import type { TagInfo } from '../../types/discord';
 
 const tag = (id: string): TagInfo => ({ id, nickname: `nick${id}`, username: `user${id}` });
@@ -127,58 +127,6 @@ describe('looksLikeDiscordId — กันเลขปลอมไม่ให�
         expect(looksLikeDiscordId('')).toBe(false);
         expect(looksLikeDiscordId('48401208457782887a')).toBe(false);
         expect(looksLikeDiscordId(' 484012084577828875 ')).toBe(false);
-    });
-});
-
-describe('resolveName — ไล่หาชื่อ 3 ทาง', () => {
-    const NAME = { nickname: '30 [VES-PD] Ralph Shelby', username: 'ralph' };
-    const ALT = { nickname: 'ralph', username: 'ralph' };
-
-    /** นับว่าแต่ละทางถูกเรียกกี่ครั้ง เพื่อยืนยันว่าไม่ยิง Discord เกินจำเป็น */
-    const makeSrc = (local: typeof NAME | null, member: typeof NAME | null, user: typeof ALT | null) => {
-        const calls = { local: 0, member: 0, user: 0 };
-        const src: NameSource = {
-            local: () => { calls.local++; return local; },
-            member: async () => { calls.member++; return member; },
-            user: async () => { calls.user++; return user; },
-        };
-        return { src, calls };
-    };
-
-    it('สมุดในเครื่องมีชื่อ → ใช้เลย ห้ามยิงถาม Discord', async () => {
-        const { src, calls } = makeSrc(NAME, null, null);
-        await expect(resolveName(src, '111')).resolves.toEqual(NAME);
-        expect(calls.member).toBe(0);
-        expect(calls.user).toBe(0);
-    });
-
-    it('สมุดไม่มี แต่ถาม Discord เรื่องสมาชิกได้ → ใช้ชื่อนั้น ไม่ต้องถามบัญชีต่อ', async () => {
-        const { src, calls } = makeSrc(null, NAME, ALT);
-        await expect(resolveName(src, '111')).resolves.toEqual(NAME);
-        expect(calls.member).toBe(1);
-        expect(calls.user).toBe(0);
-    });
-
-    it('ออกจากเซิร์ฟแล้ว (ไม่ใช่สมาชิก) → ยังได้ชื่อจากบัญชีผู้ใช้', async () => {
-        const { src, calls } = makeSrc(null, null, ALT);
-        await expect(resolveName(src, '111')).resolves.toEqual(ALT);
-        expect(calls.user).toBe(1);
-    });
-
-    it('ไม่ได้เลยทั้ง 3 ทาง → คืนค่าว่าง (ตัวเรียกต้องนับยอดให้อยู่ดี)', async () => {
-        const { src } = makeSrc(null, null, null);
-        await expect(resolveName(src, '111')).resolves.toEqual(UNKNOWN_NAME);
-    });
-
-    it('ลำดับต้องเป็น สมุด → สมาชิก → บัญชี เสมอ', async () => {
-        const order: string[] = [];
-        const src: NameSource = {
-            local: () => { order.push('local'); return null; },
-            member: async () => { order.push('member'); return null; },
-            user: async () => { order.push('user'); return null; },
-        };
-        await resolveName(src, '111');
-        expect(order).toEqual(['local', 'member', 'user']);
     });
 });
 

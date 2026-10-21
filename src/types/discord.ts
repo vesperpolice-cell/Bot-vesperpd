@@ -10,6 +10,13 @@ export interface TagInfo {
     id: string;
     nickname: string;
     username: string;
+    /**
+     * true เฉพาะเมื่อ nickname เป็นชื่อเล่นที่ถูกตั้งไว้ในเซิร์ฟเวอร์จริง ๆ
+     *
+     * ดูจากตัวค่าแยกไม่ออกว่าเป็นชื่อเล่นหรือชื่อบัญชี Discord ที่ fallback มา
+     * ฝั่งเขียนชีตต้องรู้ ไม่งั้นจะเอาชื่อบัญชีไปทับชื่อในระบบที่ดีอยู่แล้ว
+     */
+    hasGuildNickname?: boolean;
 }
 
 /**

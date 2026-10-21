@@ -2,6 +2,8 @@ import { Client, CommandInteraction, ButtonInteraction } from 'discord.js';
 import { sheetService } from '../../core/sheet.service';
 import { configService } from '../../core/config.service';
 import { normalizeName, replyAndDelete, silentCatch } from '../../services/utils';
+import { isSystemNickname } from '../../services/member.service';
+import { lookupName } from '../../services/name-resolver';
 import { logger } from '../../core/logger';
 import { locks } from '../../core/lock.service';
 import type { TagInfo } from '../../types/discord';
@@ -128,6 +130,8 @@ async function writeCountOps(ops: CountOp[], cfg: CountConfig): Promise<void> {
             // (ยิ่งตอนหักคนที่ออกจากเซิร์ฟไปแล้ว เราจะไม่มีชื่อเขา แถวที่สร้างจะไม่มีชื่อด้วย)
             const rowIdx = op.isDelete ? findUserRow(rows, op.tag) : ensureUserRow(rows, op.tag);
             if (rowIdx === -1) continue;
+            // ชื่อเล่นในเซิร์ฟเปลี่ยนแล้ว → ให้ชีตตามความจริง ไม่ต้องรอใครมาแก้มือ
+            refreshDisplayName(rows, rowIdx, op.tag);
             const currentVal = parseInt(rows[rowIdx][colIdx] || '0') || 0;
             const newVal = currentVal + (op.isDelete ? -1 : 1);
             rows[rowIdx][colIdx] = newVal > 0 ? newVal.toString() : '';
@@ -273,6 +277,31 @@ export function ensureUserRow(rows: string[][], tag: TagInfo): number {
     return rows.length - 1;
 }
 
+/**
+ * อัปเดตช่องชื่อ (คอลัมน์ A) ให้เป็นชื่อเล่นปัจจุบันในเซิร์ฟเวอร์ — คืน true เมื่อเปลี่ยนจริง
+ *
+ * ของเดิมเขียนคอลัมน์ A ครั้งเดียวตอนสร้างแถว (ดู ensureUserRow) แล้วไม่เคยอัปเดตอีกเลย
+ * ใครถูกนับยอดก่อนลงทะเบียน ชื่อบัญชี Discord จะคาอยู่ในชีตตลอดไป
+ * แม้ภายหลังจะมีชื่อในระบบ `รหัส [VES-PD] ชื่อ IC` แล้วก็ไม่มีอะไรมาแก้ให้
+ * และปุ่มนับใหม่ก็ไม่ช่วย เพราะมันล้างแต่คอลัมน์ยอด (C–G) ไม่แตะชื่อ
+ *
+ * เขียนทับเฉพาะเมื่อครบ 2 เงื่อนไข:
+ *   1) ชื่อมาจากชื่อเล่นที่ตั้งในเซิร์ฟจริง ไม่ใช่ชื่อบัญชี Discord ที่ fallback มา
+ *   2) อยู่ในรูปแบบชื่อในระบบของคนใน
+ *
+ * ต้องกัน 2 ชั้นเพราะชื่อในชีตต้อง "ดีขึ้นหรือเท่าเดิม" ห้ามถอยหลัง —
+ * คนนอกและคนที่ออกจากเซิร์ฟไปแล้วไม่มีชื่อเล่นให้ใช้ ปล่อยชื่อเดิมไว้ดีกว่าทับด้วยชื่อบัญชี
+ */
+export function refreshDisplayName(rows: string[][], rowIdx: number, tag: TagInfo): boolean {
+    const row = rows[rowIdx];
+    if (!row || !tag.hasGuildNickname) return false;
+    const name = tag.nickname.trim();
+    if (!name || !isSystemNickname(name)) return false;
+    if ((row[0] ?? '') === name) return false;
+    row[0] = name;
+    return true;
+}
+
 export async function processCountBatch(
     tags: TagInfo[],
     channelId: string,
@@ -371,27 +400,29 @@ export async function manualRecount(client: Client, interaction: RecountInteract
                     )] as string[];
 
                     for (const uid of uniqueIds) {
-                        if (!userCache.has(uid)) {
-                            try {
-                                const user = await client.users.fetch(uid);
-                                const member = await interaction.guild.members.fetch(uid).catch(() => null);
-                                const nickname = member
-                                    ? (member.nickname || member.displayName || user.username)
-                                    : user.username;
-                                userCache.set(uid, {
-                                    id: uid,
-                                    nickname,
-                                    username: user.username,
-                                });
-                            } catch {
-                                continue;
-                            }
+                        let person = userCache.get(uid);
+                        if (!person) {
+                            /*
+                             * ใช้ตัวหาชื่อตัวเดียวกับการนับสด
+                             *
+                             * ของเดิมตรงนี้มีตรรกะหาชื่อของตัวเองแยกอีกชุด สองทางจึงได้ชื่อไม่เท่ากัน
+                             * และไม่รู้ด้วยว่าชื่อที่ได้เป็นชื่อเล่นจริงหรือชื่อบัญชีที่ fallback มา
+                             */
+                            const name = await lookupName(interaction.guild, uid);
+                            // หาไม่ได้ทั้งชื่อเล่นและชื่อบัญชี = เลขปลอมหรือบัญชีถูกลบ ไม่ต้องสร้างแถว
+                            if (!name.nickname && !name.username) continue;
+                            person = {
+                                id: uid,
+                                nickname: name.nickname,
+                                username: name.username,
+                                hasGuildNickname: name.hasGuildNickname,
+                            };
+                            userCache.set(uid, person);
                         }
 
-                        const person = userCache.get(uid);
-                        if (!person) continue;
-
                         const rowIdx = ensureUserRow(rows, person);
+                        // รอบนี้เขียนชีตทั้งตาราง — ซ่อมชื่อเก่าที่ค้างอยู่ให้ทุกแถวที่เจอไปเลย
+                        refreshDisplayName(rows, rowIdx, person);
                         const currentVal = parseInt(rows[rowIdx][ch.col] || '0') || 0;
                         rows[rowIdx][ch.col] = (currentVal + 1).toString();
                     }

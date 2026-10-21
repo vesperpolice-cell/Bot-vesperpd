@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { findRowById, ensureUserRow, buildCountUpdates } from './count.service';
+import { findRowById, ensureUserRow, buildCountUpdates, refreshDisplayName } from './count.service';
 import type { TagInfo } from '../../types/discord';
 
 const emptyRows: string[][] = [];
@@ -182,5 +182,77 @@ describe('นับได้แม้ไม่รู้ชื่อคน (ค�
         const rows = structuredClone(existingRows) as string[][];
         const tag: TagInfo = { id: '999', nickname: '', username: 'alice' };
         expect(ensureUserRow(rows, tag)).toBe(4);
+    });
+});
+
+describe('refreshDisplayName — ช่องชื่อต้องตามชื่อเล่นในเซิร์ฟ', () => {
+    /*
+     * ของเดิมเขียนช่องชื่อครั้งเดียวตอนสร้างแถว แล้วไม่เคยอัปเดตอีก
+     * ใครถูกนับยอดก่อนลงทะเบียน ชื่อบัญชี Discord จะคาอยู่ในชีตตลอดไป
+     * กฎคือชื่อในชีตต้อง "ดีขึ้นหรือเท่าเดิม" ห้ามถอยหลังเป็นชื่อบัญชี
+     */
+    const nick = '00 [VES-PD] Real Yamada';
+    const rowsWith = (name: string) => [[], [], [...headerOnlyRows[2]], [name, '111', '5', '', '', '', '']];
+
+    it('ชื่อเล่นในระบบ + แถวเดิมเป็นชื่อ DC → เปลี่ยนให้เป็นชื่อเล่น', () => {
+        const rows = rowsWith('RealYamada');
+        const tag: TagInfo = { id: '111', nickname: nick, username: 'realyamada', hasGuildNickname: true };
+        expect(refreshDisplayName(rows, 3, tag)).toBe(true);
+        expect(rows[3][0]).toBe(nick);
+        expect(rows[3].slice(1)).toEqual(['111', '5', '', '', '', '']); // ห้ามแตะยอด
+    });
+
+    it('ชื่อเหมือนเดิมอยู่แล้ว → ไม่นับว่าเปลี่ยน (กันเขียนชีตฟรี ๆ)', () => {
+        const rows = rowsWith(nick);
+        const tag: TagInfo = { id: '111', nickname: nick, username: 'realyamada', hasGuildNickname: true };
+        expect(refreshDisplayName(rows, 3, tag)).toBe(false);
+    });
+
+    it('ชื่อที่ได้มาไม่ใช่ชื่อเล่นในเซิร์ฟ (ชื่อบัญชี/ชื่อ global) → ห้ามทับ', () => {
+        const rows = rowsWith(nick);
+        const tag: TagInfo = { id: '111', nickname: 'RealYamada', username: 'realyamada', hasGuildNickname: false };
+        expect(refreshDisplayName(rows, 3, tag)).toBe(false);
+        expect(rows[3][0]).toBe(nick);
+    });
+
+    it('คนออกจากเซิร์ฟไปแล้ว (ไม่มีชื่อเล่นให้ดึง) → คงชื่อเดิมในชีตไว้', () => {
+        const rows = rowsWith(nick);
+        const tag: TagInfo = { id: '111', nickname: '', username: '', hasGuildNickname: false };
+        expect(refreshDisplayName(rows, 3, tag)).toBe(false);
+        expect(rows[3][0]).toBe(nick);
+    });
+
+    it('คนนอกที่ตั้งชื่อเล่นอิสระ (ไม่ใช่รูปแบบในระบบ) → ไม่แตะชื่อเดิม', () => {
+        const rows = rowsWith('Yamada');
+        const tag: TagInfo = { id: '111', nickname: 'ป้าข้างบ้าน', username: 'aunty', hasGuildNickname: true };
+        expect(refreshDisplayName(rows, 3, tag)).toBe(false);
+        expect(rows[3][0]).toBe('Yamada');
+    });
+
+    it('ธงไม่ได้ถูกส่งมาเลย (ของเก่าที่ยังไม่รู้จักธง) → ถือว่าไม่ใช่ชื่อเล่น ห้ามทับ', () => {
+        const rows = rowsWith('RealYamada');
+        const tag: TagInfo = { id: '111', nickname: nick, username: 'realyamada' };
+        expect(refreshDisplayName(rows, 3, tag)).toBe(false);
+    });
+
+    it('แถวที่ยังไม่มี 7 ช่อง → เขียนชื่อได้ ไม่พัง', () => {
+        const rows: string[][] = [[], [], [...headerOnlyRows[2]], ['Old', '111']];
+        const tag: TagInfo = { id: '111', nickname: nick, username: 'realyamada', hasGuildNickname: true };
+        expect(refreshDisplayName(rows, 3, tag)).toBe(true);
+        expect(rows[3]).toEqual([nick, '111']);
+    });
+
+    it('ชี้ไปที่แถวที่ไม่มีอยู่ → เงียบ ๆ ไม่ทำอะไร', () => {
+        const rows = rowsWith(nick);
+        const tag: TagInfo = { id: '111', nickname: nick, username: 'realyamada', hasGuildNickname: true };
+        expect(refreshDisplayName(rows, 99, tag)).toBe(false);
+    });
+
+    it('แถวใหม่ที่เพิ่งสร้างด้วยชื่อเล่นอยู่แล้ว → ไม่ต้องเขียนซ้ำ', () => {
+        const rows = structuredClone(headerOnlyRows) as string[][];
+        const tag: TagInfo = { id: '777', nickname: nick, username: 'realyamada', hasGuildNickname: true };
+        const idx = ensureUserRow(rows, tag);
+        expect(rows[idx][0]).toBe(nick);
+        expect(refreshDisplayName(rows, idx, tag)).toBe(false);
     });
 });

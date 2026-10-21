@@ -123,6 +123,52 @@ describe('หักยอด — ต้องไม่สร้างแถว�
     });
 });
 
+describe('ช่องชื่อในชีต — ต้องตามชื่อเล่นที่ตั้งในเซิร์ฟ', () => {
+    const NICK = '00 [VES-PD] Real Yamada';
+    const writtenRows = () => {
+        const updates = batchUpdate.mock.calls[0][1];
+        return updates.flatMap((u: { values: string[][] }) => u.values) as string[][];
+    };
+
+    it('แถวเดิมเป็นชื่อบัญชี + คนนั้นมีชื่อในระบบแล้ว → เขียนชื่อใหม่ลงชีตพร้อมยอด', async () => {
+        // เคสจริงที่เจอ: ถูกนับยอดก่อนลงทะเบียน ชื่อบัญชีจึงคาอยู่ในชีต
+        getValues.mockResolvedValue([[], [], [...HEADER], ['RealYamada', '111', '5', '', '', '', '']]);
+
+        await processCountBatch(
+            [{ id: '111', nickname: NICK, username: 'realyamada', hasGuildNickname: true }],
+            'ch1',
+            false,
+        );
+        await flushPendingCounts();
+
+        expect(writtenRows().some(row => row[0] === NICK && row[1] === '111' && row[2] === '6')).toBe(true);
+    });
+
+    it('หาได้แต่ชื่อบัญชี (ออกจากเซิร์ฟ/ยังไม่มีชื่อเล่น) → ชื่อในชีตต้องไม่ถูกทับ', async () => {
+        getValues.mockResolvedValue([[], [], [...HEADER], [NICK, '111', '5', '', '', '', '']]);
+
+        await processCountBatch(
+            [{ id: '111', nickname: 'realyamada', username: 'realyamada', hasGuildNickname: false }],
+            'ch1',
+            false,
+        );
+        await flushPendingCounts();
+
+        expect(writtenRows().some(row => row[0] === NICK && row[2] === '6')).toBe(true);
+    });
+
+    it('แถวใหม่ของคนที่มีชื่อในระบบ → ได้ชื่อเล่นตั้งแต่แถวแรก ไม่ใช่ชื่อบัญชี', async () => {
+        await processCountBatch(
+            [{ id: '777', nickname: NICK, username: 'realyamada', hasGuildNickname: true }],
+            'ch1',
+            false,
+        );
+        await flushPendingCounts();
+
+        expect(writtenRows().some(row => row[0] === NICK && row[1] === '777' && row[2] === '1')).toBe(true);
+    });
+});
+
 describe('flushDelayFor — ถอยห่างขึ้นเรื่อย ๆ เมื่อพลาดติดกัน', () => {
     it('ยิ่งพลาดยิ่งรอนานขึ้น', () => {
         expect(flushDelayFor(0)).toBe(3000);
