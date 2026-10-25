@@ -276,6 +276,8 @@ src/
 │   ├── lock.service.ts   รายการ lock ทั้งหมดของระบบ
 │   ├── ratelimiter.ts    จำกัดความถี่ต่อผู้ใช้
 │   ├── credentials.ts    อ่านกุญแจ Google จาก env หรือไฟล์
+│   ├── gateway-status.ts สถานะ shard / close code / login error ที่ควรรู้
+│   ├── login-attempts.ts ตัวนับเชื่อมต่อไม่สำเร็จ (เก็บลงดิสก์ รอดจากการรีสตาร์ท)
 │   └── logger.ts         log ลง stdout + ไฟล์ (หมุนไฟล์เองเมื่อเต็ม 5 MB)
 ├── features/             แต่ละฟีเจอร์แยกโฟลเดอร์ มี listener.ts เป็นตัวลงทะเบียน event
 │   ├── count/  welcome/  logtime/  bypd/  proctor/
@@ -422,6 +424,9 @@ GET /health
   "status": "ok",
   "discord": true,
   "inGuild": true,
+  "lockedOut": false,
+  "loginAttempts": 0,
+  "lockOutReason": null,
   "guilds": 1,
   "shards": [{ "id": 0, "status": "Ready", "ping": 42 }],
   "wsPing": 42,
@@ -434,11 +439,14 @@ GET /health
 |---|---|
 | `discord` | shard ทุกตัวพร้อมรับ event จริง — ไม่ใช่ `client.isReady()` ที่ค้าง `true` ไว้ |
 | `inGuild` | ยังอยู่ในเซิร์ฟเวอร์หลัก (`GUILD_ID`) หรือไม่ — ถูกเตะ/แบนแล้วจะเป็น `false` |
+| `lockedOut` | บอทหยุดพยายามเชื่อมต่อเองแล้ว (เชื่อมไม่สำเร็จครบเพดาน — ดูหัวข้อถัดไป) |
+| `loginAttempts` | เชื่อมต่อไม่สำเร็จไปแล้วกี่ครั้ง (นับข้ามการรีสตาร์ท) |
+| `lockOutReason` | เหตุผลที่หยุด — `null` เมื่อยังไม่ได้หยุด |
 | `guilds` | จำนวนเซิร์ฟเวอร์ที่บอทเห็นตอนนี้ |
 | `shards` | สถานะ shard ทีละตัว (`Ready`, `Reconnecting`, …) พร้อม ping |
 
 ตอบ **200** เมื่อ `discord` และ `inGuild` เป็นจริงทั้งคู่ — นอกนั้นตอบ **503**
-โดย `status` จะบอกสาเหตุว่า `discord_disconnected` หรือ `not_in_guild`
+โดย `status` จะบอกสาเหตุว่า `login_locked_out`, `discord_disconnected` หรือ `not_in_guild`
 ตั้ง UptimeRobot หรือ monitor ตัวอื่นชี้มาที่นี่ได้เลย
 (`GET /` ตอบ `Bot is alive! ✅` เฉย ๆ ไม่ได้เช็คสถานะ Discord)
 
@@ -459,10 +467,34 @@ Discord หลุดเกิน **15 นาที** จะสั่งรีส
 | กลับมาจริง (`shardReady` / `shardResume`) | `INFO` — resume ไม่ได้จะ re-identify ใหม่และไม่มี `shardResume` ตามมา จึงต้องดู `shardReady` ด้วย |
 | หลุดด้วย code ที่ต่อใหม่ไม่ได้ (`shardDisconnect`: 4004, 4010–4014) | `ERROR` + สั่งรีสตาร์ท เพราะต่ออีกกี่ครั้งก็ไม่ติด (ต้องแก้ token/intents) |
 | ถูกนำออกจากเซิร์ฟเวอร์ (`guildDelete`) | `ERROR` พร้อมชื่อเซิร์ฟเวอร์ — เตะกับแบนแยกจากฝั่ง gateway ไม่ได้ |
-| `client.login()` ค้าง (Discord ไม่ตอบ handshake) | `ERROR` เมื่อครบ 60 วิ + รีสตาร์ท — เดิมค้างเงียบได้เป็นชั่วโมงโดยไม่มี log เลย |
+| `client.login()` ค้าง (Discord ไม่ตอบ handshake) | `ERROR` เมื่อครบ 60 วิ แล้วเข้าสู่เพดานในหัวข้อถัดไป — เดิมค้างเงียบได้เป็นชั่วโมงโดยไม่มี log เลย |
 
-ตอนบูตจะยิงทดสอบ `discord.com` 1 ครั้ง (timeout 10 วิ) แล้ว log `Discord API เข้าถึงได้ (HTTP 200 · 120 ms)`
-— ถ้าตกตรงนี้แสดงว่าเป็นที่เน็ตขาออก/ DNS ของโฮสต์ ไม่ใช่ฝั่ง Discord
+### หยุดเองเมื่อเชื่อมต่อไม่ได้ (กันการยิง Discord)
+
+ตอนบูตบอทจะถาม Discord 1 ครั้งที่ `GET /api/v10/gateway/bot` — endpoint เดียวกับที่ `client.login()` ใช้
+แนบ `Authorization` และ `User-Agent` แบบเดียวกับ discord.js เพื่อให้เห็นเงื่อนไขจริงเป๊ะ ๆ
+
+- ผ่าน (200) → log `Discord API ตอบปกติ (HTTP 200 · 120 ms)` แล้วต่อด้วย `client.login()`
+- ไม่ผ่าน → log `HTTP <status>` + `Retry-After` + header ที่เกี่ยวข้อง (`x-ratelimit-*`, `cf-ray`, `server`, `via`)
+  + body ของ Discord **และไม่เรียก `client.login()` เลย** เพราะ `@discordjs/rest` แปล 429 เป็น
+  "รอแล้วลองใหม่ไม่จำกัดจำนวนครั้ง" (ไม่ throw) — ปล่อยให้ login ทำงานต่อคือการยิง Discord ถี่ขึ้นเรื่อย ๆ
+  จน `login()` ค้างเงียบเป็นชั่วโมง และหน้าต่างลิมิตยิ่งยาวขึ้น
+
+ถ้าเชื่อมต่อไม่สำเร็จ**ครบ 2 ครั้งติดกัน** (นับข้ามการรีสตาร์ท เพราะเก็บใน `logs/login-attempts.json`)
+บอทจะหยุดส่งคำขอไป Discord ทั้งหมด แต่ยังรัน HTTP ไว้ให้ `/health` ตอบ `login_locked_out`
+พร้อม `lockOutReason` — watchdog ก็จะไม่สั่งรีสตาร์ทในโหมดนี้ (การรีสตาร์ท = ยิง Discord ใหม่)
+
+| สถานการณ์ | สิ่งที่เกิดขึ้น |
+|---|---|
+| ล้มเหลวครั้งที่ 1 | log `WARN` แล้วออกไปให้โฮสต์สตาร์ทใหม่หนึ่งรอบ (มีแค่รอบเดียว) |
+| ล้มเหลวครั้งที่ 2 | หยุดเลย ไม่ exit — `/health` เป็น 503 `login_locked_out` |
+| บูตมาพร้อมตัวนับครบ 2 | ไม่ยิงคำขอไป Discord แม้แต่ครั้งเดียว |
+| token/intents ผิด (401/403/4004/4013/4014) | หยุดทันที ไม่ลองซ้ำ เพราะลองอีกกี่ครั้งก็ได้ผลเดิม |
+| เขียนไฟล์ตัวนับไม่ได้ (ดิสก์อ่านอย่างเดียว) | หยุดทันทีเช่นกัน ไม่งั้นรีสตาร์ทแล้วนับใหม่จาก 0 จะวนไม่จบ |
+| ต่อติดสำเร็จ | ลบไฟล์ตัวนับทิ้งเอง |
+
+**วิธีปลดล็อก** (หลังแก้ต้นเหตุแล้ว): deploy ใหม่ (ได้ดิสก์ใหม่) หรือลบ `logs/login-attempts.json`
+แล้วสั่ง restart service — บอทจะกลับมาลอง 2 ครั้งเหมือนเดิม
 
 ### Log
 
@@ -531,3 +563,5 @@ GET /logs
 | บอทอ่านข้อความไม่เห็น | ยังไม่ได้เปิด **Message Content Intent** ใน Developer Portal |
 | ดึงรายชื่อสมาชิกไม่ได้ | ยังไม่ได้เปิด **Server Members Intent** |
 | ปุ่มแผงควบคุมค้างที่ "หยุดทำงาน" | แผงค้างจากรอบก่อนที่บอทรีสตาร์ทกลางคัน — กดปุ่มหนึ่งครั้งเพื่อรีเฟรชแผงให้ตรงความจริง |
+| `/health` ตอบ `login_locked_out` | บอทเชื่อมต่อไม่สำเร็จครบ 2 ครั้งแล้วจึงหยุดเอง (กันการยิง Discord) — แก้ `lockOutReason` ใน `/health` หรือ log `STARTUP` ก่อน แล้ว deploy/ลบ `logs/login-attempts.json` เพื่อปลดล็อก |
+| log ขึ้น `HTTP 429` ตอนบูต | Discord/Cloudflare จำกัด IP ขาออกของโฮสต์ (IP ร่วมกับ service อื่น) — ดู `Retry-After` กับ `cf-ray` ที่ log ไว้ ถ้าเป็นลิมิตที่ระดับ IP ให้ย้าย region หรือย้ายไปโฮสต์ที่มี IPv4 ของตัวเอง |

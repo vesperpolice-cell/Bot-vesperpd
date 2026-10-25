@@ -3,3 +3,4 @@ dist/
 .env
 credentials.json
 *.log
+logs/login-attempts.json

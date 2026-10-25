@@ -2,6 +2,7 @@ import { Client, GatewayIntentBits, Partials, Events, SlashCommandBuilder, Conte
 import http from 'http';
 import https from 'https';
 import crypto from 'crypto';
+import path from 'path';
 import { env, BOT, CACHE, validate } from './config';
 import { configService } from './core/config.service';
 import { rateLimiter } from './core/ratelimiter';
@@ -10,6 +11,7 @@ import { startLogStore, flushLogSheet, pendingLogRows } from './core/logstore.se
 import { clearAllReplyTimeouts, silentCatch } from './services/utils';
 import { flushPendingCounts, pendingCountOps } from './features/count/count.service';
 import { allShardsReady, closeCodeName, isFatalLoginError, isUnrecoverableClose, shardStatusName } from './core/gateway-status';
+import { MAX_LOGIN_ATTEMPTS, clearLoginAttempts, fileFor, isLockedOut, readLoginAttempts, recordLoginFailure } from './core/login-attempts';
 
 const errors = validate();
 if (errors.length > 0) {
@@ -27,6 +29,19 @@ const client = new Client({
 });
 
 let shuttingDown = false;
+
+/**
+ * หยุดพยายามเชื่อมต่อ Discord แล้วหรือยัง
+ *
+ * Discord ตอบ 429 ได้ง่ายมากเมื่อถูกยิงถี่ ๆ จาก IP เดียวกัน และ discord.js ไม่ throw อะไรออกมาให้เห็น
+ * (มันรอแล้ว retry 429 ไปเรื่อย ๆ ไม่มีเพดาน) การปล่อยให้โฮสต์รีสตาร์ทวนไปเรื่อย ๆ จึงมีแต่ทำให้
+ * หน้าต่างลิมิตยาวขึ้น ครบ MAX_LOGIN_ATTEMPTS ครั้งแล้วจะหยุดยิง Discord เลย
+ * แต่ยังเปิด HTTP ไว้ให้ /health บอกสถานะและเหตุผล
+ */
+const LOGIN_STATE_FILE = fileFor(path.join(__dirname, '../logs'));
+let lockedOut = false;
+let lockOutReason = '';
+let loginAttempts = 0;
 
 /**
  * Discord ต่ออยู่จริงไหม
@@ -68,28 +83,190 @@ async function loginWithTimeout(token: string, ms: number): Promise<void> {
     }
 }
 
+/** header ที่มีประโยชน์ต่อการวินิจฉัย 429 — เก็บแค่นี้เพื่อไม่ให้ log ยาว */
+const PROBE_HEADERS = [
+    'retry-after',
+    'x-ratelimit-global',
+    'x-ratelimit-limit',
+    'x-ratelimit-remaining',
+    'x-ratelimit-reset-after',
+    'x-ratelimit-scope',
+    'x-ratelimit-bucket',
+    'server',
+    'cf-ray',
+    'via',
+    'content-type',
+] as const;
+
 /**
- * ยิงทดสอบสั้น ๆ ว่าโฮสต์นี้ออกไป discord.com ได้ไหม (1 request ตอนบูต ไม่มีผลกับการทำงาน)
+ * UA เดียวกับที่ discord.js ยิง Discord: `DiscordBot (…) <appendix>`
  *
- * มีไว้แยกสาเหตุสองอย่างที่อาการเหมือนกันเป๊ะ ๆ ใน log:
- * "เน็ตขาออกของโฮสต์ใช้ไม่ได้" กับ "เน็ตปกติแต่ gateway ไม่ตอบ"
+ * ต้องใส่ให้เหมือน ไม่งั้น Cloudflare จะเห็นเป็นบอทแปลกปลอม และผลตรวจจะไม่ตรงกับที่ login เจอจริง
+ * (2.6.3 = ค่า DefaultUserAgent ของ @discordjs/rest ซึ่งเป็นค่าคงที่ในไลบรารี)
  */
-async function probeDiscordReachable(ms = 10_000): Promise<void> {
+const PROBE_USER_AGENT = `DiscordBot (https://discord.js.org, 2.6.3) ${client.rest.options.userAgentAppendix}`;
+
+interface GatewayProbe {
+    ok: boolean;
+    status: number;
+    ms: number;
+    retryAfter: string | null;
+    headers: Record<string, string>;
+    body: string;
+    error: string | null;
+}
+
+/**
+ * ถาม Discord ว่า "พร้อมให้ต่อไหม" ด้วย endpoint เดียวกับที่ client.login() ใช้ (/gateway/bot)
+ *
+ * ตั้งใจให้เป็นด่านหน้า login: ถ้าโดน 429 ตั้งแต่ตรงนี้ การปล่อยให้ client.login() วิ่งต่อ
+ * มีแต่ทำให้ Discord ถูกลิมิตหนักขึ้น (discord.js retry 429 ไปเรื่อย ๆ ไม่มีเพดาน)
+ * พร้อมเก็บ header/body ไว้ให้ฟันธงสาเหตุได้ทันที
+ */
+function probeGateway(token: string, ms = 10_000): Promise<GatewayProbe> {
     const started = Date.now();
-    const status = await new Promise<number>((resolve, reject) => {
+    return new Promise<GatewayProbe>((resolve) => {
+        const fail = (message: string): void => {
+            resolve({ ok: false, status: 0, ms: Date.now() - started, retryAfter: null, headers: {}, body: '', error: message });
+        };
         const req = https.request(
-            { hostname: 'discord.com', path: '/api/v10/gateway', method: 'GET', timeout: ms },
+            {
+                hostname: 'discord.com',
+                path: '/api/v10/gateway/bot',
+                method: 'GET',
+                timeout: ms,
+                headers: {
+                    Authorization: `Bot ${token}`,
+                    'User-Agent': PROBE_USER_AGENT,
+                    Accept: 'application/json',
+                },
+            },
             (res) => {
-                res.resume(); // ทิ้ง body ไม่ต้องอ่าน
-                res.on('end', () => resolve(res.statusCode ?? 0));
-                res.on('error', reject);
+                let body = '';
+                res.setEncoding('utf8');
+                // body ของ 429 สั้นมาก แต่กันไว้ไม่ให้อ่านไม่จบถ้าเซิร์ฟเวอร์ส่งมายาว
+                res.on('data', (chunk: string) => { if (body.length < 600) body += chunk; });
+                res.on('error', (err: Error) => fail(err.message));
+                res.on('end', () => {
+                    const picked: Record<string, string> = {};
+                    for (const name of PROBE_HEADERS) {
+                        const value = res.headers[name];
+                        if (typeof value === 'string') picked[name] = value;
+                    }
+                    resolve({
+                        ok: (res.statusCode ?? 0) === 200,
+                        status: res.statusCode ?? 0,
+                        ms: Date.now() - started,
+                        retryAfter: picked['retry-after'] ?? null,
+                        headers: picked,
+                        body: body.replace(/\s+/g, ' ').trim().slice(0, 300),
+                        error: null,
+                    });
+                });
             },
         );
-        req.on('timeout', () => req.destroy(new Error(`ไม่ตอบภายใน ${ms} ms`)));
-        req.on('error', reject);
+        req.on('timeout', () => req.destroy(new Error(`Discord ไม่ตอบภายใน ${ms} ms`)));
+        req.on('error', (err: Error) => fail(err.message));
         req.end();
     });
-    logger.info('STARTUP', `Discord API เข้าถึงได้ (HTTP ${status} · ${Date.now() - started} ms)`);
+}
+
+/** log ผลตรวจแบบละเอียด — ตอนปกติเหลือบรรทัดเดียว ตอนผิดปกติใส่ header/body ครบ */
+function logProbeResult(p: GatewayProbe): void {
+    if (p.ok) {
+        logger.info('STARTUP', `Discord API ตอบปกติ (HTTP 200 · ${p.ms} ms)`);
+        return;
+    }
+    if (p.status === 0) {
+        logger.error('STARTUP', `ติดต่อ discord.com ไม่ได้: ${p.error ?? 'ไม่ทราบสาเหตุ'} (${p.ms} ms)`);
+        return;
+    }
+    logger.error('STARTUP', `Discord ปฏิเสธคำขอ: HTTP ${p.status} · ${p.ms} ms${p.retryAfter ? ` · Retry-After ${p.retryAfter} วิ` : ''}`);
+    logger.error('STARTUP', `headers: ${JSON.stringify(p.headers)}`);
+    if (p.body) logger.error('STARTUP', `body: ${p.body}`);
+    if (p.status === 429) {
+        const edge = /cloudflare|error 10\d\d|attention required/i.test(p.body);
+        logger.error('STARTUP', edge
+            ? 'ตีความ: 429 มาจาก Cloudflare/edge — IP ขาออกของโฮสต์ถูกจำกัด ไม่ใช่ปัญหาที่ token'
+            : 'ตีความ: 429 จาก Discord API — ลิมิตที่ระดับ IP (IP ร่วมกับคนอื่น) หรือ token ไม่ใช่เน็ตหลุด');
+    }
+}
+
+/**
+ * ประกาศหยุดเชื่อมต่อ — ไม่ exit เพราะ exit = โฮสต์สตาร์ทใหม่ = ยิง Discord อีกรอบ
+ * HTTP server ยังทำงานอยู่ (/health จะตอบ login_locked_out พร้อมเหตุผล) แต่จะไม่มีคำขอไป Discord เลย
+ */
+function giveUp(reason: string): void {
+    lockedOut = true;
+    lockOutReason = reason;
+    logger.error('STARTUP', `หยุดพยายามเชื่อมต่อ Discord: ${reason}`);
+    logger.error('STARTUP', `จะไม่ส่งคำขอไป Discord อีกจนกว่าจะรีสตาร์ท/deploy ใหม่ — กันไม่ให้ถูกลิมิตยาวขึ้น (ตัวนับ: ${LOGIN_STATE_FILE})`);
+}
+
+/**
+ * เก็บผล "เชื่อมต่อไม่สำเร็จหนึ่งครั้ง" แล้วตัดสินใจว่าจะลองต่อหรือหยุด
+ *
+ * - ครบ `MAX_LOGIN_ATTEMPTS` → หยุดเลย ไม่ exit
+ * - ยังไม่ครบ → ออกไปให้โฮสต์สตาร์ทใหม่หนึ่งรอบ (เพดาน 2 ครั้ง จึงมีรอบเดียว)
+ * - เขียนตัวนับไม่ได้ → หยุดทันที ไม่งั้นรีสตาร์ทแล้วนับใหม่จาก 0 จะวนไม่จบ
+ */
+function handleLoginFailure(status: number | null, error: string): void {
+    const { state, persisted } = recordLoginFailure(LOGIN_STATE_FILE, status, error);
+    loginAttempts = state.attempts;
+
+    if (/ค้างเกิน/.test(error)) {
+        logger.error('STARTUP', 'สาเหตุ: Discord ไม่ตอบ handshake — มักเป็น 429/ลิมิตที่ระดับ IP หรือเน็ตขาออกสะดุด');
+    }
+
+    // token/intents ผิด = ลองอีกกี่ครั้งก็ได้ผลเดิม ไม่ต้องเสียคำขอไปฟรี
+    if (isFatalLoginError(error) || status === 401 || status === 403) {
+        giveUp(`${error} (ต้องแก้ token/intents ก่อนแล้วค่อยรีสตาร์ท)`);
+        return;
+    }
+    if (!persisted) {
+        giveUp(`${error} (เขียนไฟล์ตัวนับไม่ได้ จึงหยุดเพื่อกันการยิงซ้ำไม่จบ)`);
+        return;
+    }
+    if (isLockedOut(state)) {
+        giveUp(`เชื่อมต่อไม่สำเร็จ ${state.attempts} ครั้งติดกัน · ล่าสุด: ${error}`);
+        return;
+    }
+    logger.warn('STARTUP', `เชื่อมต่อ Discord ไม่สำเร็จครั้งที่ ${state.attempts}/${MAX_LOGIN_ATTEMPTS}: ${error} — จะลองอีกครั้งเดียวแล้วหยุด`);
+    setTimeout(() => { logger.close(); process.exit(1); }, 200);
+}
+
+/**
+ * เชื่อมต่อ Discord แบบมีลำดับชั้น: เช็กสิทธิ์การลอง → ถามก่อนว่าโดนลิมิตไหม → login
+ *
+ * probe ใช้ endpoint เดียวกับ login (/gateway/bot) ถ้าโดน 429 ตั้งแต่ตรงนี้แล้วยังปล่อยให้
+ * client.login() ทำงานต่อ discord.js จะ retry 429 ไปเรื่อย ๆ (ไม่มีเพดาน) และค้างเงียบเป็นชั่วโมง
+ */
+async function connectDiscord(): Promise<void> {
+    const prior = readLoginAttempts(LOGIN_STATE_FILE);
+    loginAttempts = prior.attempts;
+    if (isLockedOut(prior)) {
+        giveUp(`เคยล้มเหลว ${prior.attempts} ครั้ง (ล่าสุด ${prior.lastAt ?? '-'} · ${prior.lastError ?? '-'})`);
+        return;
+    }
+
+    const probe = await probeGateway(env.botToken);
+    logProbeResult(probe);
+    if (!probe.ok) {
+        handleLoginFailure(probe.status === 0 ? null : probe.status, probe.error ?? `HTTP ${probe.status}`);
+        return;
+    }
+
+    logger.info('CLIENT', 'กำลังเชื่อมต่อ Discord...');
+    try {
+        await loginWithTimeout(env.botToken, LOGIN_TIMEOUT_MS);
+    } catch (err) {
+        handleLoginFailure(probe.status, err instanceof Error ? err.message : String(err));
+        return;
+    }
+
+    // ต่อติดแล้ว — ล้างตัวนับ ไม่งั้นครั้งถัดไปหลังรีสตาร์ทปกติจะเริ่มจากค่าเก่า
+    loginAttempts = 0;
+    clearLoginAttempts(LOGIN_STATE_FILE);
 }
 
 let restartCount = 0;
@@ -120,6 +297,8 @@ function safeRestart(reason: string): void {
 let lastDiscordOk = Date.now();
 
 setInterval(() => {
+    // ตั้งใจหยุดเชื่อมต่ออยู่ — ห้ามรีสตาร์ท เพราะการรีสตาร์ทคือการยิง Discord ใหม่
+    if (lockedOut) return;
     if (discordOnline()) { lastDiscordOk = Date.now(); return; }
     if (Date.now() - lastDiscordOk > BOT.WATCHDOG_TIMEOUT_MIN * 60 * 1000) {
         logger.error('SYSTEM', `Watchdog: Discord หลุดเกิน ${BOT.WATCHDOG_TIMEOUT_MIN} นาที กำลังรีสตาร์ท`);
@@ -185,7 +364,7 @@ function handleLogs(req: http.IncomingMessage, res: http.ServerResponse): void {
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify({
         ok: true,
-        bot: { online: discordOnline(), inGuild: inHomeGuild(), uptime: process.uptime(), wsPing: client.ws.ping },
+        bot: { online: discordOnline(), inGuild: inHomeGuild(), lockedOut, uptime: process.uptime(), wsPing: client.ws.ping },
         buffer: bufferStats(),
         pendingSheetRows: pendingLogRows(),
         pendingCountOps: pendingCountOps(),
@@ -208,9 +387,13 @@ const server = http.createServer((req, res) => {
         // (เช่น UptimeRobot) แจ้งเตือนได้ทันที แทนที่จะเห็น 200 แล้วเข้าใจว่าบอทยังปกติดี
         res.writeHead(ok ? 200 : 503, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({
-            status: ok ? 'ok' : !online ? 'discord_disconnected' : 'not_in_guild',
+            status: ok ? 'ok' : lockedOut ? 'login_locked_out' : !online ? 'discord_disconnected' : 'not_in_guild',
             discord: online,
             inGuild,
+            // หยุดพยายามเชื่อมต่อเองแล้วหรือยัง — true = จะไม่ยิง Discord อีกจนกว่าจะรีสตาร์ท/deploy ใหม่
+            lockedOut,
+            loginAttempts,
+            lockOutReason: lockedOut ? lockOutReason : null,
             // ถูกนำออกจากเซิร์ฟเวอร์ทั้งหมดแล้วค่านี้จะเป็น 0
             guilds: client.guilds.cache.size,
             // ปกติมี shard เดียว ส่งแค่ id/สถานะ/ping ไม่ได้เก็บข้อมูลเพิ่ม
@@ -231,6 +414,8 @@ server.on('error', (err) => logger.error('SERVER', `HTTP เซิร์ฟเ�
 // ---- Self-ping ----
 // มีไว้กันโฮสต์ฟรีหลับอย่างเดียว ไม่ยุ่งกับ watchdog อีกต่อไป
 setInterval(() => {
+    // หยุดเชื่อมต่ออยู่ = ไม่มีอะไรให้เฝ้า ปล่อยให้โฮสต์หลับได้ ไม่ต้องเปลืองชั่วโมงฟรี
+    if (lockedOut) return;
     const lib = env.renderUrl.startsWith('https://') ? https : http;
     const req = lib.get(env.renderUrl, (res) => { res.resume(); }); // resume() = ทิ้ง body ให้ socket ถูกคืน ไม่งั้นรั่วสะสม
     req.setTimeout(10000, () => req.destroy());
@@ -406,26 +591,16 @@ async function start(): Promise<void> {
         }
     }
 
-    // ทดสอบเน็ตขาออกก่อน 1 ครั้ง — ถ้าตกตรงนี้แปลว่าปัญหาอยู่ที่โฮสต์ ไม่ใช่ Discord
-    try {
-        await probeDiscordReachable();
-    } catch (err) {
-        throw new Error(`Discord API เข้าถึงไม่ได้: ${err instanceof Error ? err.message : String(err)}`);
-    }
-
-    // log ไว้ก่อนเสมอ — ถ้าไม่มีบรรทัดนี้ใน log แปลว่าค้างก่อนถึงขั้นเชื่อมต่อ
-    logger.info('CLIENT', 'กำลังเชื่อมต่อ Discord...');
-    await loginWithTimeout(env.botToken, LOGIN_TIMEOUT_MS);
+    // ต่อ Discord แบบมีเพดานการลอง — ถ้าโดนลิมิต/ต่อไม่ติดซ้ำ ๆ จะหยุดยิง Discord เอง (ดู connectDiscord)
+    await connectDiscord();
 }
 
 start().catch((err: Error) => {
+    // ข้อผิดพลาดระหว่างสตาร์ท — "เชื่อมต่อ Discord ไม่สำเร็จ" ถูกจัดการใน connectDiscord แล้ว
+    // ตรงนี้จึงเหลือเคสไม่คาดคิด: ปล่อยให้โฮสต์สตาร์ทใหม่ แต่รอให้ log เขียนลงไฟล์จบก่อน
     logger.error('STARTUP', `เริ่มบอทไม่สำเร็จ: ${err.stack || err.message}`);
     if (isFatalLoginError(err.message)) {
         logger.error('STARTUP', 'สาเหตุ: token ไม่ถูกต้อง/ถูกรีเซ็ต หรือไม่ได้เปิด Privileged Intents ใน Developer Portal');
-    } else if (err.message.includes('ค้างเกิน')) {
-        logger.error('STARTUP', 'สาเหตุ: ออกไป discord.com ไม่ได้ หรือเน็ตของโฮสต์สะดุด — ปล่อยให้ระบบสตาร์ทใหม่รอบถัดไป');
     }
-    // discord.js ทำลาย client ทิ้งเมื่อ login พลาด (Client.login → destroy) จึงลองซ้ำในโปรเซสเดิมไม่ได้
-    // ปล่อยให้โฮสต์สตาร์ทใหม่ แต่รอให้ log เขียนลงไฟล์จบก่อน ไม่งั้นสาเหตุที่แท้จริงหายไป
     setTimeout(() => { logger.close(); process.exit(1); }, 200);
 });
