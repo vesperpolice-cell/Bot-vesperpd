@@ -4,11 +4,16 @@ import os from 'os';
 import path from 'path';
 import {
     MAX_LOGIN_ATTEMPTS,
+    MAX_RETRY_WAIT_MS,
+    NETWORK_RETRY_BACKOFF_MS,
+    RETRY_AFTER_FALLBACK_MS,
     clearLoginAttempts,
     fileFor,
+    formatWait,
     isLockedOut,
     readLoginAttempts,
     recordLoginFailure,
+    retryDelay,
 } from './login-attempts';
 
 let dir = '';
@@ -73,5 +78,34 @@ describe('login-attempts — ตัวนับการเชื่อมต่
         const result = recordLoginFailure(dir, 429, 'HTTP 429');
         expect(result.persisted).toBe(false);
         expect(result.state.attempts).toBe(1);
+    });
+});
+
+describe('login-attempts — เวลารอก่อนลองใหม่', () => {
+    it('เคารพ Retry-After ของ Discord (วินาที)', () => {
+        // ค่าที่เจอจริงบน Render: Retry-After 3026 วิ
+        expect(retryDelay(429, '3026')).toEqual({ ms: 3_026_000, capped: false });
+        expect(retryDelay(429, '30')).toEqual({ ms: 30_000, capped: false });
+    });
+
+    it('ไม่ยอมรอเกินเพดาน', () => {
+        expect(retryDelay(429, '86400')).toEqual({ ms: MAX_RETRY_WAIT_MS, capped: true });
+    });
+
+    it('429 ที่ไม่มี Retry-After ใช้ค่าสำรอง', () => {
+        expect(retryDelay(429, null).ms).toBe(RETRY_AFTER_FALLBACK_MS);
+        expect(retryDelay(429, 'oops').ms).toBe(RETRY_AFTER_FALLBACK_MS);
+    });
+
+    it('ติดต่อไม่ได้เลย (status 0) รอสั้น ๆ แล้วลองใหม่', () => {
+        expect(retryDelay(0, null).ms).toBe(NETWORK_RETRY_BACKOFF_MS);
+        expect(retryDelay(null, null).ms).toBe(NETWORK_RETRY_BACKOFF_MS);
+    });
+
+    it('formatWait อ่านง่ายทั้งนาทีและวินาที', () => {
+        expect(formatWait(3_026_000)).toBe('50 นาที');
+        expect(formatWait(60_000)).toBe('1 นาที');
+        expect(formatWait(30_000)).toBe('30 วินาที');
+        expect(formatWait(200)).toBe('1 วินาที');
     });
 });

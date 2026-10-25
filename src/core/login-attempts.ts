@@ -94,3 +94,37 @@ export function clearLoginAttempts(file: string): void {
         // ลบไม่ได้ก็ไม่เป็นไร รอบหน้าจะเขียนทับด้วยค่าใหม่
     }
 }
+
+/** เพดานเวลารอ — Discord เคยสั่ง Retry-After เป็นชั่วโมง ๆ ตอนบล็อก IP */
+export const MAX_RETRY_WAIT_MS = 60 * 60 * 1000;
+/** 429 ที่ไม่มี Retry-After มาให้ */
+export const RETRY_AFTER_FALLBACK_MS = 5 * 60 * 1000;
+/** คำขอไม่ถึง Discord เลย (เน็ตสะดุด/DNS) */
+export const NETWORK_RETRY_BACKOFF_MS = 60 * 1000;
+
+export interface RetryDelay {
+    ms: number;
+    /** Discord สั่งรอมากกว่าเพดาน จึงรอสั้นกว่าเดิม */
+    capped: boolean;
+}
+
+/**
+ * แปลง Retry-After ของ Discord (วินาที) เป็นเวลาที่จะรอก่อนลองครั้งสุดท้าย
+ *
+ * เคารพที่ Discord สั่ง แต่ไม่ยอมรอข้ามวัน — ถ้าสั่งมาเกิน MAX_RETRY_WAIT_MS
+ * ก็รอเท่าเพดานแล้วลองดู จะได้ไม่ค้างเงียบเป็นสิบ ๆ ชั่วโมงโดยไม่มีใครรู้
+ */
+export function retryDelay(status: number | null, retryAfter: string | null): RetryDelay {
+    if (status !== 429) return { ms: NETWORK_RETRY_BACKOFF_MS, capped: false };
+    const seconds = Number(retryAfter);
+    const asked = Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : RETRY_AFTER_FALLBACK_MS;
+    if (asked > MAX_RETRY_WAIT_MS) return { ms: MAX_RETRY_WAIT_MS, capped: true };
+    return { ms: asked, capped: false };
+}
+
+/** เวลารอเป็นข้อความอ่านง่าย (ใช้ใน log/`/health`) */
+export function formatWait(ms: number): string {
+    if (ms >= 60_000) return `${Math.round(ms / 60_000)} นาที`;
+    return `${Math.max(1, Math.round(ms / 1000))} วินาที`;
+}
+

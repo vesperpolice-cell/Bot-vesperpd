@@ -11,7 +11,7 @@ import { startLogStore, flushLogSheet, pendingLogRows } from './core/logstore.se
 import { clearAllReplyTimeouts, silentCatch } from './services/utils';
 import { flushPendingCounts, pendingCountOps } from './features/count/count.service';
 import { allShardsReady, closeCodeName, isFatalLoginError, isUnrecoverableClose, shardStatusName } from './core/gateway-status';
-import { MAX_LOGIN_ATTEMPTS, clearLoginAttempts, fileFor, isLockedOut, readLoginAttempts, recordLoginFailure } from './core/login-attempts';
+import { MAX_LOGIN_ATTEMPTS, clearLoginAttempts, fileFor, formatWait, isLockedOut, readLoginAttempts, recordLoginFailure, retryDelay } from './core/login-attempts';
 
 const errors = validate();
 if (errors.length > 0) {
@@ -185,88 +185,102 @@ function logProbeResult(p: GatewayProbe): void {
     logger.error('STARTUP', `headers: ${JSON.stringify(p.headers)}`);
     if (p.body) logger.error('STARTUP', `body: ${p.body}`);
     if (p.status === 429) {
-        const edge = /cloudflare|error 10\d\d|attention required/i.test(p.body);
+        const edge = /cloudflare|error 10\d\d|attention required|just a moment/i.test(p.body);
+        // Discord ตอบแบบนี้ = บล็อกที่ระดับ IP ขาออก (shared IP ของโฮสต์คลาวด์โดนรวมหัว)
+        const globalBlock = /global rate limits|blocked from accessing our api/i.test(p.body);
         logger.error('STARTUP', edge
             ? 'ตีความ: 429 มาจาก Cloudflare/edge — IP ขาออกของโฮสต์ถูกจำกัด ไม่ใช่ปัญหาที่ token'
-            : 'ตีความ: 429 จาก Discord API — ลิมิตที่ระดับ IP (IP ร่วมกับคนอื่น) หรือ token ไม่ใช่เน็ตหลุด');
+            : globalBlock
+                ? 'ตีความ: Discord บล็อก IP ขาออกของโฮสต์ (global rate limit) — ไม่ใช่ token/เน็ตหลุด เส้นทางถาวรคือเปลี่ยน IP (ย้าย region/VPS)'
+                : 'ตีความ: 429 จาก Discord API — ลิมิตที่ระดับ IP (IP ร่วมกับคนอื่น) หรือ token ไม่ใช่เน็ตหลุด');
     }
 }
 
 /**
- * ประกาศหยุดเชื่อมต่อ — ไม่ exit เพราะ exit = โฮสต์สตาร์ทใหม่ = ยิง Discord อีกรอบ
- * HTTP server ยังทำงานอยู่ (/health จะตอบ login_locked_out พร้อมเหตุผล) แต่จะไม่มีคำขอไป Discord เลย
+ * กำลังรอตามที่ Discord สั่ง (Retry-After) — ค่า > 0 = กำลังรอ (watchdog ต้องไม่รีสตาร์ท)
+ */
+let retryAtMs = 0;
+
+/**
+ * ประกาศหยุดเชื่อมต่อ — ไม่ exit เพราะ exit = โฮสต์สตาร์ทใหม่ = ยิง Discord อีกคำขอทันที
+ * (ตัวนับบนดิสก์ไม่รอดจากการสร้าง instance ใหม่ของโฮสต์ จึงใช้ตัวนับในโปรเซสเป็นหลัก)
  */
 function giveUp(reason: string): void {
     lockedOut = true;
     lockOutReason = reason;
     logger.error('STARTUP', `หยุดพยายามเชื่อมต่อ Discord: ${reason}`);
-    logger.error('STARTUP', `จะไม่ส่งคำขอไป Discord อีกจนกว่าจะรีสตาร์ท/deploy ใหม่ — กันไม่ให้ถูกลิมิตยาวขึ้น (ตัวนับ: ${LOGIN_STATE_FILE})`);
+    logger.error('STARTUP', 'จะไม่ส่งคำขอไป Discord อีกเลยจนกว่าจะรีสตาร์ท/deploy ใหม่ — กันไม่ให้ถูกลิมิตยาวขึ้น');
+}
+
+/** รอตามเวลาที่กำหนดโดยไม่ยิงคำขอใด ๆ ออกไป แล้วคืนกลับมาลองครั้งสุดท้าย */
+function waitBeforeRetry(ms: number, why: string): Promise<void> {
+    retryAtMs = Date.now() + ms;
+    logger.warn('STARTUP', `รอ ${formatWait(ms)} ${why} — ระหว่างนี้จะไม่ส่งคำขอไป Discord เลย`);
+    return new Promise<void>((resolve) => {
+        setTimeout(() => { retryAtMs = 0; resolve(); }, ms);
+    });
 }
 
 /**
- * เก็บผล "เชื่อมต่อไม่สำเร็จหนึ่งครั้ง" แล้วตัดสินใจว่าจะลองต่อหรือหยุด
+ * เชื่อมต่อ Discord แบบมีเพดาน: ถามก่อนว่าโดนลิมิตไหม → รอตามที่เขาสั่ง → ลองครั้งสุดท้าย → หยุด
  *
- * - ครบ `MAX_LOGIN_ATTEMPTS` → หยุดเลย ไม่ exit
- * - ยังไม่ครบ → ออกไปให้โฮสต์สตาร์ทใหม่หนึ่งรอบ (เพดาน 2 ครั้ง จึงมีรอบเดียว)
- * - เขียนตัวนับไม่ได้ → หยุดทันที ไม่งั้นรีสตาร์ทแล้วนับใหม่จาก 0 จะวนไม่จบ
- */
-function handleLoginFailure(status: number | null, error: string): void {
-    const { state, persisted } = recordLoginFailure(LOGIN_STATE_FILE, status, error);
-    loginAttempts = state.attempts;
-
-    if (/ค้างเกิน/.test(error)) {
-        logger.error('STARTUP', 'สาเหตุ: Discord ไม่ตอบ handshake — มักเป็น 429/ลิมิตที่ระดับ IP หรือเน็ตขาออกสะดุด');
-    }
-
-    // token/intents ผิด = ลองอีกกี่ครั้งก็ได้ผลเดิม ไม่ต้องเสียคำขอไปฟรี
-    if (isFatalLoginError(error) || status === 401 || status === 403) {
-        giveUp(`${error} (ต้องแก้ token/intents ก่อนแล้วค่อยรีสตาร์ท)`);
-        return;
-    }
-    if (!persisted) {
-        giveUp(`${error} (เขียนไฟล์ตัวนับไม่ได้ จึงหยุดเพื่อกันการยิงซ้ำไม่จบ)`);
-        return;
-    }
-    if (isLockedOut(state)) {
-        giveUp(`เชื่อมต่อไม่สำเร็จ ${state.attempts} ครั้งติดกัน · ล่าสุด: ${error}`);
-        return;
-    }
-    logger.warn('STARTUP', `เชื่อมต่อ Discord ไม่สำเร็จครั้งที่ ${state.attempts}/${MAX_LOGIN_ATTEMPTS}: ${error} — จะลองอีกครั้งเดียวแล้วหยุด`);
-    setTimeout(() => { logger.close(); process.exit(1); }, 200);
-}
-
-/**
- * เชื่อมต่อ Discord แบบมีลำดับชั้น: เช็กสิทธิ์การลอง → ถามก่อนว่าโดนลิมิตไหม → login
- *
- * probe ใช้ endpoint เดียวกับ login (/gateway/bot) ถ้าโดน 429 ตั้งแต่ตรงนี้แล้วยังปล่อยให้
- * client.login() ทำงานต่อ discord.js จะ retry 429 ไปเรื่อย ๆ (ไม่มีเพดาน) และค้างเงียบเป็นชั่วโมง
+ * ห้ามใช้วิธี "exit แล้วให้โฮสต์สตาร์ทใหม่" เป็นตัวนับ เพราะไฟล์ตัวนับไม่รอดจากการสร้าง instance ใหม่
+ * (Render ขึ้น instance ใหม่ = ดิสก์ใหม่ = อ่านได้ 0) ผลคือ restart loop ที่ยิง Discord ไม่จบ
+ * การนับและรอในโปรเซสเดิมจึงเชื่อถือได้กว่า และไม่เกิด restart loop เลย
  */
 async function connectDiscord(): Promise<void> {
     const prior = readLoginAttempts(LOGIN_STATE_FILE);
-    loginAttempts = prior.attempts;
+    // ต่อจากที่เคยนับไว้ ถ้าดิสก์เก็บไว้ได้ (VPS/เครื่องตัวเองเก็บได้ ส่วนโฮสต์ฟรีมักไม่ได้)
+    let attempts = prior.attempts;
+    loginAttempts = attempts;
     if (isLockedOut(prior)) {
         giveUp(`เคยล้มเหลว ${prior.attempts} ครั้ง (ล่าสุด ${prior.lastAt ?? '-'} · ${prior.lastError ?? '-'})`);
         return;
     }
 
-    const probe = await probeGateway(env.botToken);
-    logProbeResult(probe);
-    if (!probe.ok) {
-        handleLoginFailure(probe.status === 0 ? null : probe.status, probe.error ?? `HTTP ${probe.status}`);
-        return;
-    }
+    while (attempts < MAX_LOGIN_ATTEMPTS) {
+        attempts += 1;
+        loginAttempts = attempts;
 
-    logger.info('CLIENT', 'กำลังเชื่อมต่อ Discord...');
-    try {
-        await loginWithTimeout(env.botToken, LOGIN_TIMEOUT_MS);
-    } catch (err) {
-        handleLoginFailure(probe.status, err instanceof Error ? err.message : String(err));
-        return;
-    }
+        // ด่านที่ 1: ถามด้วย endpoint เดียวกับ login — โดน 429 ตั้งแต่ตรงนี้ก็ไม่ต้องเสียคำขอให้ login อีก
+        const probe = await probeGateway(env.botToken);
+        logProbeResult(probe);
 
-    // ต่อติดแล้ว — ล้างตัวนับ ไม่งั้นครั้งถัดไปหลังรีสตาร์ทปกติจะเริ่มจากค่าเก่า
-    loginAttempts = 0;
-    clearLoginAttempts(LOGIN_STATE_FILE);
+        if (probe.ok) {
+            logger.info('CLIENT', 'กำลังเชื่อมต่อ Discord...');
+            try {
+                await loginWithTimeout(env.botToken, LOGIN_TIMEOUT_MS);
+            } catch (err) {
+                const message = err instanceof Error ? err.message : String(err);
+                recordLoginFailure(LOGIN_STATE_FILE, probe.status, message);
+                // client ที่ login ค้างไว้ใช้ซ้ำไม่ได้ — หยุดแทนการ exit (exit = ยิง Discord ใหม่)
+                giveUp(`เชื่อมต่อไม่สำเร็จครั้งที่ ${attempts}/${MAX_LOGIN_ATTEMPTS}: ${message}`);
+                return;
+            }
+            loginAttempts = 0;
+            clearLoginAttempts(LOGIN_STATE_FILE);
+            return;
+        }
+
+        const error = probe.error ?? `HTTP ${probe.status}`;
+        const { state } = recordLoginFailure(LOGIN_STATE_FILE, probe.status === 0 ? null : probe.status, error);
+
+        // token/intents ผิด = ลองอีกกี่ครั้งก็ได้ผลเดิม ไม่ต้องเสียคำขอไปฟรี
+        if (isFatalLoginError(error) || probe.status === 401 || probe.status === 403) {
+            giveUp(`${error} (ต้องแก้ token/intents ก่อนแล้วค่อยรีสตาร์ท)`);
+            return;
+        }
+        if (attempts >= MAX_LOGIN_ATTEMPTS || isLockedOut(state)) {
+            giveUp(`เชื่อมต่อไม่สำเร็จ ${attempts} ครั้งติดกัน · ล่าสุด: ${error}`);
+            return;
+        }
+
+        const wait = retryDelay(probe.status === 0 ? null : probe.status, probe.retryAfter);
+        if (wait.capped) {
+            logger.warn('STARTUP', `Discord สั่งรอนานกว่าเพดาน — จะรอแค่ ${formatWait(wait.ms)} แล้วลองครั้งสุดท้าย`);
+        }
+        await waitBeforeRetry(wait.ms, probe.status === 429 ? 'ตามที่ Discord สั่ง (Retry-After)' : 'แล้วลองใหม่');
+    }
 }
 
 let restartCount = 0;
@@ -297,8 +311,8 @@ function safeRestart(reason: string): void {
 let lastDiscordOk = Date.now();
 
 setInterval(() => {
-    // ตั้งใจหยุดเชื่อมต่ออยู่ — ห้ามรีสตาร์ท เพราะการรีสตาร์ทคือการยิง Discord ใหม่
-    if (lockedOut) return;
+    // ตั้งใจหยุดเชื่อมต่อ/กำลังรอตามที่ Discord สั่ง — ห้ามรีสตาร์ท เพราะการรีสตาร์ทคือการยิง Discord ใหม่
+    if (lockedOut || retryAtMs > 0) return;
     if (discordOnline()) { lastDiscordOk = Date.now(); return; }
     if (Date.now() - lastDiscordOk > BOT.WATCHDOG_TIMEOUT_MIN * 60 * 1000) {
         logger.error('SYSTEM', `Watchdog: Discord หลุดเกิน ${BOT.WATCHDOG_TIMEOUT_MIN} นาที กำลังรีสตาร์ท`);
@@ -387,13 +401,20 @@ const server = http.createServer((req, res) => {
         // (เช่น UptimeRobot) แจ้งเตือนได้ทันที แทนที่จะเห็น 200 แล้วเข้าใจว่าบอทยังปกติดี
         res.writeHead(ok ? 200 : 503, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({
-            status: ok ? 'ok' : lockedOut ? 'login_locked_out' : !online ? 'discord_disconnected' : 'not_in_guild',
+            status: ok ? 'ok'
+                : lockedOut ? 'login_locked_out'
+                : retryAtMs > 0 ? 'rate_limited'
+                : !online ? 'discord_disconnected'
+                : 'not_in_guild',
             discord: online,
             inGuild,
             // หยุดพยายามเชื่อมต่อเองแล้วหรือยัง — true = จะไม่ยิง Discord อีกจนกว่าจะรีสตาร์ท/deploy ใหม่
             lockedOut,
             loginAttempts,
             lockOutReason: lockedOut ? lockOutReason : null,
+            // กำลังรอตาม Retry-After ของ Discord อยู่ — ระหว่างนี้ไม่มีการยิงคำขอเลย
+            retryAtMs: retryAtMs > 0 ? retryAtMs : null,
+            retryInSeconds: retryAtMs > 0 ? Math.max(0, Math.ceil((retryAtMs - Date.now()) / 1000)) : null,
             // ถูกนำออกจากเซิร์ฟเวอร์ทั้งหมดแล้วค่านี้จะเป็น 0
             guilds: client.guilds.cache.size,
             // ปกติมี shard เดียว ส่งแค่ id/สถานะ/ping ไม่ได้เก็บข้อมูลเพิ่ม
