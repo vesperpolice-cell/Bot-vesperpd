@@ -9,6 +9,7 @@ import { logger, recent, bufferStats, type LogLevel } from './core/logger';
 import { startLogStore, flushLogSheet, pendingLogRows } from './core/logstore.service';
 import { clearAllReplyTimeouts, silentCatch } from './services/utils';
 import { flushPendingCounts, pendingCountOps } from './features/count/count.service';
+import { allShardsReady, closeCodeName, isFatalLoginError, isUnrecoverableClose, shardStatusName } from './core/gateway-status';
 
 const errors = validate();
 if (errors.length > 0) {
@@ -17,25 +18,60 @@ if (errors.length > 0) {
     process.exit(1);
 }
 
+// ---- Discord client ----
+// สร้างไว้ตรงนี้ (ก่อน watchdog และ HTTP server) เพราะทั้งสองส่วนต้องอ้างถึง
+// เดิมสร้างหลัง server.listen() — request ที่เข้ามาในช่วงนั้นจะเจอตัวแปรที่ยังไม่ถูกประกาศ (TDZ)
+const client = new Client({
+    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.GuildMembers],
+    partials: [Partials.Message, Partials.Channel, Partials.Reaction],
+});
+
+let shuttingDown = false;
+
+/**
+ * Discord ต่ออยู่จริงไหม
+ *
+ * ดูจากสถานะ shard แทน client.isReady() เพราะ discord.js ตั้ง ws.status = Ready
+ * ครั้งเดียวตอนต่อติดแล้วไม่เคยตั้งกลับ (อธิบายไว้ใน core/gateway-status)
+ */
+function discordOnline(): boolean {
+    return !shuttingDown && allShardsReady([...client.ws.shards.values()]);
+}
+
+/** ยังอยู่ในเซิร์ฟเวอร์หลักไหม — ถูกเตะ/แบนแล้วต่อติดก็ทำงานไม่ได้ */
+function inHomeGuild(): boolean {
+    return client.guilds.cache.has(env.guildId);
+}
+
 let restartCount = 0;
 let firstCrash = Date.now();
+let capWarnedAt = 0;
 function safeRestart(reason: string): void {
     const now = Date.now();
     if (now - firstCrash > BOT.RESTART_RESET_INTERVAL_MS) { restartCount = 0; firstCrash = now; }
     restartCount++;
-    if (restartCount > BOT.MAX_RESTART_PER_DAY) { logger.error('SYSTEM', 'ถึงขีดจำกัดการรีสตาร์ทแล้ว'); return; }
+    if (restartCount > BOT.MAX_RESTART_PER_DAY) {
+        // ไม่สแปม log ทุกครั้งที่ watchdog ตรวจ — เตือนชั่วโมงละครั้งพอ
+        if (now - capWarnedAt > 60 * 60 * 1000) {
+            capWarnedAt = now;
+            logger.error('SYSTEM', `ถึงขีดจำกัดการรีสตาร์ทแล้ว (${BOT.MAX_RESTART_PER_DAY} ครั้ง/วัน) — หยุดรีสตาร์ทอัตโนมัติจนถึงรอบถัดไป`);
+        }
+        return;
+    }
     logger.warn('SYSTEM', `กำลังรีสตาร์ท (${restartCount}/${BOT.MAX_RESTART_PER_DAY}) | ${reason}`);
-    setTimeout(() => process.exit(1), BOT.RESTART_DELAY_MS);
+    // ปิด log ให้เขียนลงไฟล์จนจบก่อนออก ไม่งั้นบรรทัดสุดท้ายก่อนตายหายเงียบ ๆ
+    setTimeout(() => { logger.close(); process.exit(1); }, BOT.RESTART_DELAY_MS);
 }
 
 // ---- Watchdog ----
 // เฝ้าดู "การเชื่อมต่อ Discord" ไม่ใช่เว็บเซิร์ฟเวอร์ของตัวเอง
 // ของเดิมนับ heartbeat จาก HTTP request ที่เข้ามา ซึ่ง self-ping เติมให้เองทุก 7 นาที
 // ทำให้ lastAlive สดตลอดเวลา และ watchdog ไม่มีวันทำงาน แม้ Discord จะหลุดไปนานแค่ไหน
+// และเช็กจากสถานะ shard (discordOnline) ไม่ใช่ client.isReady() ที่ค้าง true ตลอด
 let lastDiscordOk = Date.now();
 
 setInterval(() => {
-    if (client.isReady()) { lastDiscordOk = Date.now(); return; }
+    if (discordOnline()) { lastDiscordOk = Date.now(); return; }
     if (Date.now() - lastDiscordOk > BOT.WATCHDOG_TIMEOUT_MIN * 60 * 1000) {
         logger.error('SYSTEM', `Watchdog: Discord หลุดเกิน ${BOT.WATCHDOG_TIMEOUT_MIN} นาที กำลังรีสตาร์ท`);
         lastDiscordOk = Date.now(); // กันสั่งรีสตาร์ทซ้ำระหว่างรอ RESTART_DELAY_MS
@@ -100,7 +136,7 @@ function handleLogs(req: http.IncomingMessage, res: http.ServerResponse): void {
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify({
         ok: true,
-        bot: { ready: client.isReady(), uptime: process.uptime(), wsPing: client.ws.ping },
+        bot: { online: discordOnline(), inGuild: inHomeGuild(), uptime: process.uptime(), wsPing: client.ws.ping },
         buffer: bufferStats(),
         pendingSheetRows: pendingLogRows(),
         pendingCountOps: pendingCountOps(),
@@ -115,13 +151,21 @@ const server = http.createServer((req, res) => {
         return;
     }
     if (req.url === '/health') {
-        const ready = client.isReady();
-        // ตอบ 503 เมื่อ Discord หลุด เพื่อให้ตัวมอนิเตอร์ภายนอก (เช่น UptimeRobot)
-        // แจ้งเตือนได้ทันที แทนที่จะเห็น 200 แล้วเข้าใจว่าบอทยังปกติดี
-        res.writeHead(ready ? 200 : 503, { 'Content-Type': 'application/json' });
+        const online = discordOnline();
+        // ต่อติดไม่เท่ากับใช้งานได้ — ถูกเตะ/แบนแล้วบอทยังออนไลน์แต่คำสั่งทั้งหมดเงียบ
+        const inGuild = inHomeGuild();
+        const ok = online && inGuild;
+        // ตอบ 503 เมื่อ Discord หลุด หรือหลุดออกจากเซิร์ฟเวอร์หลัก เพื่อให้ตัวมอนิเตอร์ภายนอก
+        // (เช่น UptimeRobot) แจ้งเตือนได้ทันที แทนที่จะเห็น 200 แล้วเข้าใจว่าบอทยังปกติดี
+        res.writeHead(ok ? 200 : 503, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({
-            status: ready ? 'ok' : 'discord_disconnected',
-            discord: ready,
+            status: ok ? 'ok' : !online ? 'discord_disconnected' : 'not_in_guild',
+            discord: online,
+            inGuild,
+            // ถูกนำออกจากเซิร์ฟเวอร์ทั้งหมดแล้วค่านี้จะเป็น 0
+            guilds: client.guilds.cache.size,
+            // ปกติมี shard เดียว ส่งแค่ id/สถานะ/ping ไม่ได้เก็บข้อมูลเพิ่ม
+            shards: client.ws.shards.map(s => ({ id: s.id, status: shardStatusName(s.status), ping: s.ping })),
             wsPing: client.ws.ping,
             uptime: process.uptime(),
             timestamp: Date.now(),
@@ -132,6 +176,8 @@ const server = http.createServer((req, res) => {
     res.end('Bot is alive! ✅');
 });
 server.listen(env.port, () => logger.info('SERVER', `HTTP เซิร์ฟเวอร์รันที่พอร์ต ${env.port}`));
+// พอร์ตชนกับโปรเซสอื่น = server emit error ถ้าไม่มีใครดักไว้ โปรเซสจะตายแบบไม่มี log อะไรเลย
+server.on('error', (err) => logger.error('SERVER', `HTTP เซิร์ฟเวอร์มีปัญหา: ${err.message}`));
 
 // ---- Self-ping ----
 // มีไว้กันโฮสต์ฟรีหลับอย่างเดียว ไม่ยุ่งกับ watchdog อีกต่อไป
@@ -144,8 +190,6 @@ setInterval(() => {
 
 // Cleanup expired rate limiter entries
 setInterval(() => rateLimiter.cleanup(), CACHE.RATE_LIMITER_CLEANUP_INTERVAL_MS);
-
-let shuttingDown = false;
 
 async function gracefulShutdown(signal: string): Promise<void> {
     if (shuttingDown) return; // กันสัญญาณซ้ำ (SIGINT ตามด้วย SIGTERM) สั่งปิดซ้อนกัน
@@ -187,23 +231,50 @@ process.on('unhandledRejection', (reason: unknown) => {
     logger.error('SYSTEM', `ข้อผิดพลาดที่ไม่ถูกจัดการ: ${reason instanceof Error ? reason.message : String(reason)}`);
 });
 process.on('uncaughtException', (err: Error) => {
-    logger.error('SYSTEM', `Exception ที่ไม่ถูกจัดการ: ${err.message}`);
-});
-
-const client = new Client({
-    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.GuildMembers],
-    partials: [Partials.Message, Partials.Channel, Partials.Reaction],
+    // เก็บ stack ไว้ด้วย — log แค่ message ทำให้ตามหาต้นตอไม่เจอ
+    logger.error('SYSTEM', `Exception ที่ไม่ถูกจัดการ: ${err.stack || err.message}`);
 });
 
 client.on('error', (err) => logger.error('CLIENT', `Discord error: ${err.message}`));
 client.on('warn', (info) => logger.warn('CLIENT', `Discord คำเตือน: ${info}`));
 // เห็นชัดใน log ว่าหลุด/ต่อใหม่ตอนไหน เวลาต้องไล่ปัญหาย้อนหลัง
-client.on(Events.ShardDisconnect, (_ev, id) => logger.warn('CLIENT', `Shard ${id} หลุดการเชื่อมต่อ`));
+// discord.js 14 ยิง shardDisconnect เฉพาะ code ที่ "ต่อใหม่ไม่ได้" — หลุดชั่วคราวจะได้ shardReconnecting แทน
+client.on(Events.ShardDisconnect, (ev, id) => {
+    const name = closeCodeName(ev.code);
+    // ตรวจซ้ำอีกชั้นเผื่ออนาคตไลบรารีเปลี่ยนพฤติกรรม: code ที่ต่อใหม่ได้ก็แค่บันทึก ไม่ต้องรีสตาร์ท
+    if (!isUnrecoverableClose(ev.code)) {
+        logger.warn('CLIENT', `Shard ${id} หลุดการเชื่อมต่อ (${ev.code} ${name})`);
+        return;
+    }
+    // code กลุ่มนี้ Discord ไม่ยอมให้ต่อใหม่ — ต่ออีกกี่ครั้งก็ไม่ติด ต้องแก้ที่ต้นเหตุแล้วสตาร์ทใหม่
+    logger.error('CLIENT', `Shard ${id} หลุดแบบต่อใหม่ไม่ได้ (${ev.code} ${name}) — ต้องแก้ token/intents ที่ Developer Portal`);
+    safeRestart(`shard ${id} close ${ev.code} ${name}`);
+});
 client.on(Events.ShardReconnecting, (id) => logger.warn('CLIENT', `Shard ${id} กำลังเชื่อมต่อใหม่`));
-client.on(Events.ShardResume, (id) => logger.info('CLIENT', `Shard ${id} กลับมาเชื่อมต่อแล้ว`));
+// resume ไม่ได้จะ re-identify ใหม่และไม่มี shardResume ตามมา บรรทัดนี้จึงเป็นตัวบอกว่า "กลับมาแล้ว" จริง ๆ
+client.on(Events.ShardReady, (id) => {
+    lastDiscordOk = Date.now();
+    logger.info('CLIENT', `Shard ${id} พร้อมทำงาน`);
+});
+client.on(Events.ShardResume, (id) => {
+    lastDiscordOk = Date.now();
+    logger.info('CLIENT', `Shard ${id} กลับมาเชื่อมต่อแล้ว`);
+});
+// ถูกเตะกับถูกแบนได้ event เดียวกัน แยกจากฝั่ง gateway ไม่ได้ — แต่ต้องรู้ทั้งคู่
+// ถ้าไม่ดักไว้ บอทจะดู "ออนไลน์" ทั้งที่ไม่มีเซิร์ฟเวอร์ให้ทำงานแล้ว
+client.on(Events.GuildDelete, (guild) => {
+    const home = guild.id === env.guildId;
+    logger.error('GUILD', `บอทถูกนำออกจากเซิร์ฟเวอร์ "${guild.name}" (${guild.id})`
+        + (home ? ' — เป็นเซิร์ฟเวอร์หลัก บอทจะไม่ทำงานเลยจนกว่าจะเชิญกลับ' : ''));
+});
 client.once(Events.ClientReady, async () => {
     lastDiscordOk = Date.now();
     logger.info('CLIENT', `${client.user?.tag} ออนไลน์พร้อมทำงาน!`);
+
+    // ไม่เห็นเซิร์ฟเวอร์หลักแปลว่าถูกเตะ/แบน หรือ GUILD_ID ใน .env ไม่ตรง
+    if (!inHomeGuild()) {
+        logger.error('CLIENT', `ไม่พบเซิร์ฟเวอร์หลัก ${env.guildId} — ถูกเตะ/แบน หรือ GUILD_ID ใน .env ไม่ตรง`);
+    }
 
     // ✅ ลงทะเบียน Slash Commands ทั้งหมดด้วย Bulk Registration
     // ✅ Slash Commands
@@ -290,6 +361,11 @@ async function start(): Promise<void> {
 }
 
 start().catch((err: Error) => {
-    logger.error('STARTUP', `เริ่มบอทไม่สำเร็จ: ${err.message}`);
-    process.exit(1);
+    logger.error('STARTUP', `เริ่มบอทไม่สำเร็จ: ${err.stack || err.message}`);
+    if (isFatalLoginError(err.message)) {
+        logger.error('STARTUP', 'สาเหตุ: token ไม่ถูกต้อง/ถูกรีเซ็ต หรือไม่ได้เปิด Privileged Intents ใน Developer Portal');
+    }
+    // discord.js ทำลาย client ทิ้งเมื่อ login พลาด (Client.login → destroy) จึงลองซ้ำในโปรเซสเดิมไม่ได้
+    // ปล่อยให้โฮสต์สตาร์ทใหม่ แต่รอให้ log เขียนลงไฟล์จบก่อน ไม่งั้นสาเหตุที่แท้จริงหายไป
+    setTimeout(() => { logger.close(); process.exit(1); }, 200);
 });
