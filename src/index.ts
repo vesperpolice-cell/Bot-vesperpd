@@ -43,6 +43,55 @@ function inHomeGuild(): boolean {
     return client.guilds.cache.has(env.guildId);
 }
 
+/**
+ * login ที่มีเพดานเวลา
+ *
+ * client.login() ค้างเงียบ ๆ ได้ — แพ็กเก็ตออกไป discord.com แล้วไม่มีคำตอบกลับ
+ * ไม่มี error ไม่มี log ไม่มี shard สักตัว บอทดู "รันอยู่" ทั้งอย่างนั้นเป็นชั่วโมง
+ * ใส่เพดานเวลาไว้ให้ start() ล้มเหลวแล้วสั่งรีสตาร์ท แทนที่จะค้างข้ามคืนโดยไม่มีใครรู้
+ */
+const LOGIN_TIMEOUT_MS = 60_000;
+async function loginWithTimeout(token: string, ms: number): Promise<void> {
+    let timer: NodeJS.Timeout | undefined;
+    try {
+        await Promise.race([
+            client.login(token),
+            new Promise<never>((_, reject) => {
+                timer = setTimeout(
+                    () => reject(new Error(`login ค้างเกิน ${Math.round(ms / 1000)} วิ (Discord ไม่ตอบ handshake)`)),
+                    ms,
+                );
+            }),
+        ]);
+    } finally {
+        if (timer) clearTimeout(timer);
+    }
+}
+
+/**
+ * ยิงทดสอบสั้น ๆ ว่าโฮสต์นี้ออกไป discord.com ได้ไหม (1 request ตอนบูต ไม่มีผลกับการทำงาน)
+ *
+ * มีไว้แยกสาเหตุสองอย่างที่อาการเหมือนกันเป๊ะ ๆ ใน log:
+ * "เน็ตขาออกของโฮสต์ใช้ไม่ได้" กับ "เน็ตปกติแต่ gateway ไม่ตอบ"
+ */
+async function probeDiscordReachable(ms = 10_000): Promise<void> {
+    const started = Date.now();
+    const status = await new Promise<number>((resolve, reject) => {
+        const req = https.request(
+            { hostname: 'discord.com', path: '/api/v10/gateway', method: 'GET', timeout: ms },
+            (res) => {
+                res.resume(); // ทิ้ง body ไม่ต้องอ่าน
+                res.on('end', () => resolve(res.statusCode ?? 0));
+                res.on('error', reject);
+            },
+        );
+        req.on('timeout', () => req.destroy(new Error(`ไม่ตอบภายใน ${ms} ms`)));
+        req.on('error', reject);
+        req.end();
+    });
+    logger.info('STARTUP', `Discord API เข้าถึงได้ (HTTP ${status} · ${Date.now() - started} ms)`);
+}
+
 let restartCount = 0;
 let firstCrash = Date.now();
 let capWarnedAt = 0;
@@ -357,13 +406,24 @@ async function start(): Promise<void> {
         }
     }
 
-    await client.login(env.botToken);
+    // ทดสอบเน็ตขาออกก่อน 1 ครั้ง — ถ้าตกตรงนี้แปลว่าปัญหาอยู่ที่โฮสต์ ไม่ใช่ Discord
+    try {
+        await probeDiscordReachable();
+    } catch (err) {
+        throw new Error(`Discord API เข้าถึงไม่ได้: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    // log ไว้ก่อนเสมอ — ถ้าไม่มีบรรทัดนี้ใน log แปลว่าค้างก่อนถึงขั้นเชื่อมต่อ
+    logger.info('CLIENT', 'กำลังเชื่อมต่อ Discord...');
+    await loginWithTimeout(env.botToken, LOGIN_TIMEOUT_MS);
 }
 
 start().catch((err: Error) => {
     logger.error('STARTUP', `เริ่มบอทไม่สำเร็จ: ${err.stack || err.message}`);
     if (isFatalLoginError(err.message)) {
         logger.error('STARTUP', 'สาเหตุ: token ไม่ถูกต้อง/ถูกรีเซ็ต หรือไม่ได้เปิด Privileged Intents ใน Developer Portal');
+    } else if (err.message.includes('ค้างเกิน')) {
+        logger.error('STARTUP', 'สาเหตุ: ออกไป discord.com ไม่ได้ หรือเน็ตของโฮสต์สะดุด — ปล่อยให้ระบบสตาร์ทใหม่รอบถัดไป');
     }
     // discord.js ทำลาย client ทิ้งเมื่อ login พลาด (Client.login → destroy) จึงลองซ้ำในโปรเซสเดิมไม่ได้
     // ปล่อยให้โฮสต์สตาร์ทใหม่ แต่รอให้ log เขียนลงไฟล์จบก่อน ไม่งั้นสาเหตุที่แท้จริงหายไป

@@ -459,6 +459,10 @@ Discord หลุดเกิน **15 นาที** จะสั่งรีส
 | กลับมาจริง (`shardReady` / `shardResume`) | `INFO` — resume ไม่ได้จะ re-identify ใหม่และไม่มี `shardResume` ตามมา จึงต้องดู `shardReady` ด้วย |
 | หลุดด้วย code ที่ต่อใหม่ไม่ได้ (`shardDisconnect`: 4004, 4010–4014) | `ERROR` + สั่งรีสตาร์ท เพราะต่ออีกกี่ครั้งก็ไม่ติด (ต้องแก้ token/intents) |
 | ถูกนำออกจากเซิร์ฟเวอร์ (`guildDelete`) | `ERROR` พร้อมชื่อเซิร์ฟเวอร์ — เตะกับแบนแยกจากฝั่ง gateway ไม่ได้ |
+| `client.login()` ค้าง (Discord ไม่ตอบ handshake) | `ERROR` เมื่อครบ 60 วิ + รีสตาร์ท — เดิมค้างเงียบได้เป็นชั่วโมงโดยไม่มี log เลย |
+
+ตอนบูตจะยิงทดสอบ `discord.com` 1 ครั้ง (timeout 10 วิ) แล้ว log `Discord API เข้าถึงได้ (HTTP 200 · 120 ms)`
+— ถ้าตกตรงนี้แสดงว่าเป็นที่เน็ตขาออก/ DNS ของโฮสต์ ไม่ใช่ฝั่ง Discord
 
 ### Log
 
