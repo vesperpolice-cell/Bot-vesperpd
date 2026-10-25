@@ -102,10 +102,26 @@ export const RETRY_AFTER_FALLBACK_MS = 5 * 60 * 1000;
 /** คำขอไม่ถึง Discord เลย (เน็ตสะดุด/DNS) */
 export const NETWORK_RETRY_BACKOFF_MS = 60 * 1000;
 
+/**
+ * เผื่อเวลาเพิ่มจาก Retry-After
+ *
+ * Retry-After บอกว่า "บล็อกถึงกี่โมง" แต่การยิงกลับไปตรงวินาทีหมดเขตพอดีคือการเดาเวลา
+ * ของเซิร์ฟเวอร์อีกเครื่อง (นาฬิกาต่างกัน + edge ปลดให้ช้ากว่าหนึ่งจังหวะ) เผื่อไว้ 5%
+ * สูงสุด 1 นาที จึงคุ้มกว่าที่จะเสีย "สิทธิ์ลองครั้งสุดท้าย" ไปเพราะคลาดไปไม่กี่วินาที
+ */
+export const RETRY_MARGIN_RATIO = 0.05;
+export const MIN_RETRY_MARGIN_MS = 1_000;
+export const MAX_RETRY_MARGIN_MS = 60_000;
+
 export interface RetryDelay {
     ms: number;
     /** Discord สั่งรอมากกว่าเพดาน จึงรอสั้นกว่าเดิม */
     capped: boolean;
+}
+
+/** เวลาที่เผื่อเพิ่มจาก Retry-After (1 วินาที – 1 นาที) */
+export function retryMarginMs(asked: number): number {
+    return Math.min(MAX_RETRY_MARGIN_MS, Math.max(MIN_RETRY_MARGIN_MS, Math.round(asked * RETRY_MARGIN_RATIO)));
 }
 
 /**
@@ -119,7 +135,7 @@ export function retryDelay(status: number | null, retryAfter: string | null): Re
     const seconds = Number(retryAfter);
     const asked = Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : RETRY_AFTER_FALLBACK_MS;
     if (asked > MAX_RETRY_WAIT_MS) return { ms: MAX_RETRY_WAIT_MS, capped: true };
-    return { ms: asked, capped: false };
+    return { ms: asked + retryMarginMs(asked), capped: false };
 }
 
 /** เวลารอเป็นข้อความอ่านง่าย (ใช้ใน log/`/health`) */

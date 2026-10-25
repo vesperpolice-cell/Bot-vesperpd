@@ -4,7 +4,9 @@ import os from 'os';
 import path from 'path';
 import {
     MAX_LOGIN_ATTEMPTS,
+    MAX_RETRY_MARGIN_MS,
     MAX_RETRY_WAIT_MS,
+    MIN_RETRY_MARGIN_MS,
     NETWORK_RETRY_BACKOFF_MS,
     RETRY_AFTER_FALLBACK_MS,
     clearLoginAttempts,
@@ -14,6 +16,7 @@ import {
     readLoginAttempts,
     recordLoginFailure,
     retryDelay,
+    retryMarginMs,
 } from './login-attempts';
 
 let dir = '';
@@ -82,10 +85,17 @@ describe('login-attempts — ตัวนับการเชื่อมต่
 });
 
 describe('login-attempts — เวลารอก่อนลองใหม่', () => {
-    it('เคารพ Retry-After ของ Discord (วินาที)', () => {
-        // ค่าที่เจอจริงบน Render: Retry-After 3026 วิ
-        expect(retryDelay(429, '3026')).toEqual({ ms: 3_026_000, capped: false });
-        expect(retryDelay(429, '30')).toEqual({ ms: 30_000, capped: false });
+    it('เคารพ Retry-After ของ Discord (วินาที) + เผื่อเวลา 5%', () => {
+        // ค่าที่เจอจริงบน Render: Retry-After 3026 วิ → เผื่อ 60 วิ (เพดาน)
+        expect(retryDelay(429, '3026')).toEqual({ ms: 3_086_000, capped: false });
+        // 30 วิ → เผื่อ 1.5 วิ
+        expect(retryDelay(429, '30')).toEqual({ ms: 31_500, capped: false });
+    });
+
+    it('เผื่อเวลาไว้ไม่เกิน 1 นาที และไม่ต่ำกว่า 1 วินาที', () => {
+        expect(retryMarginMs(3_026_000)).toBe(MAX_RETRY_MARGIN_MS);
+        expect(retryMarginMs(1_000)).toBe(MIN_RETRY_MARGIN_MS);
+        expect(retryMarginMs(0)).toBe(MIN_RETRY_MARGIN_MS);
     });
 
     it('ไม่ยอมรอเกินเพดาน', () => {
@@ -93,8 +103,9 @@ describe('login-attempts — เวลารอก่อนลองใหม่
     });
 
     it('429 ที่ไม่มี Retry-After ใช้ค่าสำรอง', () => {
-        expect(retryDelay(429, null).ms).toBe(RETRY_AFTER_FALLBACK_MS);
-        expect(retryDelay(429, 'oops').ms).toBe(RETRY_AFTER_FALLBACK_MS);
+        // 5 นาที + เผื่อ 15 วิ
+        expect(retryDelay(429, null).ms).toBe(RETRY_AFTER_FALLBACK_MS + 15_000);
+        expect(retryDelay(429, 'oops').ms).toBe(RETRY_AFTER_FALLBACK_MS + 15_000);
     });
 
     it('ติดต่อไม่ได้เลย (status 0) รอสั้น ๆ แล้วลองใหม่', () => {
