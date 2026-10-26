@@ -1,5 +1,6 @@
 import { GuildMember, Interaction, Message, PermissionsBitField } from 'discord.js';
 import { configService } from '../core/config.service';
+import { firstMentionId } from './mentions';
 
 /**
  * Permission service — centralized permission checking.
@@ -55,10 +56,6 @@ export class PermissionService {
      * Check if the interaction user is the first mention in the message (case owner).
      */
     static isCaseOwner(interaction: Interaction, targetMessage: Message): boolean {
-        const content = targetMessage.content || '';
-        const mentions = content.match(/<@!?(\d+)>/g) || [];
-        if (mentions.length === 0) return false;
-        const firstId = mentions[0]?.match(/\d+/)?.[0];
-        return firstId === interaction.user.id;
+        return firstMentionId(targetMessage.content || '') === interaction.user.id;
     }
 }

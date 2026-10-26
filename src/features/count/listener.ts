@@ -6,6 +6,7 @@ import { logger } from '../../core/logger';
 import { CACHE, COUNT } from '../../config';
 import type { TagInfo } from '../../types/discord';
 import { displayNameOf, forgetName, lookupName, pruneNameCache } from '../../services/name-resolver';
+import { extractMentionIds } from '../../services/mentions';
 
 /**
  * จำว่าโพสไหนนับให้ใครไปแล้ว — เก็บเฉพาะ "รหัสคน" ไม่เก็บชื่อเล่น
@@ -134,13 +135,7 @@ function logSummary(): void {
  */
 async function getTagsFromMessage(content: string, guild: Guild): Promise<TagInfo[]> {
     const tags: TagInfo[] = [];
-    const seen = new Set<string>();
-    const regex = /<@!?(\d+)>/g;
-    let m: RegExpExecArray | null;
-    while ((m = regex.exec(content)) !== null) {
-        const id = m[1];
-        if (seen.has(id)) continue;
-        seen.add(id);
+    for (const id of extractMentionIds(content)) {
         // ข้ามเลขที่ไม่ใช่ Discord ID — แต่ต้องบอกไว้ใน log ห้ามทิ้งแบบเงียบ ๆ
         if (!looksLikeDiscordId(id)) {
             logger.warn('นับเคส', `ข้ามแท็ก <@${id}> เพราะไม่ใช่ Discord ID (ต้องเป็นตัวเลข 17–20 หลัก)`);

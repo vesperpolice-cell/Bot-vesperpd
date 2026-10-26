@@ -4,6 +4,7 @@ import { configService } from '../../core/config.service';
 import { normalizeName, replyAndDelete, silentCatch } from '../../services/utils';
 import { isSystemNickname } from '../../services/member.service';
 import { lookupName } from '../../services/name-resolver';
+import { extractMentionIds } from '../../services/mentions';
 import { logger } from '../../core/logger';
 import { locks } from '../../core/lock.service';
 import type { TagInfo } from '../../types/discord';
@@ -392,12 +393,7 @@ export async function manualRecount(client: Client, interaction: RecountInteract
                 if (msgs.size === 0) break;
 
                 for (const msg of msgs.values()) {
-                    const mentions = msg.content.match(/<@!?(\d+)>/g) || [];
-                    const uniqueIds = [...new Set(
-                        mentions
-                            .map((m: string) => m.match(/\d+/)?.[0])
-                            .filter(Boolean)
-                    )] as string[];
+                    const uniqueIds = extractMentionIds(msg.content);
 
                     for (const uid of uniqueIds) {
                         let person = userCache.get(uid);

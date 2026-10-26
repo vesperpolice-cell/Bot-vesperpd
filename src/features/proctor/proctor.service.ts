@@ -5,6 +5,7 @@ import { logger } from '../../core/logger';
 import { locks } from '../../core/lock.service';
 import { sleep } from '../../services/utils';
 import { createRecentSet } from '../../services/recent-set';
+import { firstMentionId } from '../../services/mentions';
 
 /** กัน process message ซ้ำ (message.id เดียว) ภายใน 60 วินาที */
 const recentMessages = createRecentSet(60000);
@@ -34,18 +35,18 @@ async function sendProctorReport(ch: GuildTextBasedChannel, guild: Guild, embed:
     const discordIdRaw = getFieldValue(embed, 'Discord ID ผู้สอบ');
 
     // Resolve proctor mention
-    const proctorMatch = proctorRaw.match(/<@(\d+)>/);
+    const proctorId = firstMentionId(proctorRaw);
     let proctorVal = proctorRaw;
-    if (proctorMatch) {
-        const member = guild.members.cache.get(proctorMatch[1]) || await guild.members.fetch(proctorMatch[1]).catch(() => null);
+    if (proctorId) {
+        const member = guild.members.cache.get(proctorId) || await guild.members.fetch(proctorId).catch(() => null);
         proctorVal = member ? `<@${member.user.id}>` : proctorRaw;
     }
 
     // Resolve applicant Discord ID
-    const applicantMatch = discordIdRaw.match(/<@(\d+)>/);
+    const applicantId = firstMentionId(discordIdRaw);
     let applicantVal = discordIdRaw;
-    if (applicantMatch) {
-        const member = guild.members.cache.get(applicantMatch[1]) || await guild.members.fetch(applicantMatch[1]).catch(() => null);
+    if (applicantId) {
+        const member = guild.members.cache.get(applicantId) || await guild.members.fetch(applicantId).catch(() => null);
         applicantVal = member ? `<@${member.user.id}>` : discordIdRaw;
     }
 
