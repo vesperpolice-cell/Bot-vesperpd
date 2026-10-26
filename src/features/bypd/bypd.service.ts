@@ -5,6 +5,7 @@ import { logger } from '../../core/logger';
 import { locks } from '../../core/lock.service';
 import { sleep } from '../../services/utils';
 import { createRecentSet } from '../../services/recent-set';
+import { SYSTEM_TAG } from '../../services/member.service';
 import { hasBypdInEmbed, hasPdInEmbed, hasBypdOrPdInMessage, hasCarryInMessage, hasTake2InMessage } from './bypd.utils';
 
 /** กัน process message ซ้ำ (message.id เดียว) ภายใน 60 วินาที */
@@ -78,7 +79,7 @@ async function resolveTags(guild: Guild, content: string): Promise<string[]> {
     const allCodes = [...new Set([...bypdCodes, ...pdCodes])];
 
     const resolveOne = async (code: string): Promise<string> => {
-        const prefix = `${code} [VES-PD]`;
+        const prefix = `${code} ${SYSTEM_TAG}`;
 
         // 1. เช็ค cache ก่อน
         const cached = tagCache.get(code);

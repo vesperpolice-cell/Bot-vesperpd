@@ -1,7 +1,7 @@
 import { Guild, GuildMember } from 'discord.js';
 
 /** ป้ายของระบบที่คั่นกลางชื่อเล่น — รวมไว้ที่เดียว เปลี่ยนแบรนด์ทีหลังจะได้แก้จุดเดียว */
-const SYSTEM_TAG = '[VES-PD]';
+export const SYSTEM_TAG = '[VES-PD]';
 
 /**
  * ชื่อนี้เป็น "ชื่อในระบบ" ของคนในหรือไม่ — รูปแบบ `รหัส [VES-PD] ชื่อ IC`
@@ -20,7 +20,7 @@ export function findMembersByCode(guild: Guild, codes: string[]): { found: Guild
     const found: GuildMember[] = [];
     const notFound: string[] = [];
     for (const code of codes) {
-        const prefix = `${code} [VES-PD]`;
+        const prefix = `${code} ${SYSTEM_TAG}`;
         const matches = guild.members.cache.filter(m => (m.nickname || '').startsWith(prefix));
         if (matches.size > 0) {
             for (const [, m] of matches) {
@@ -46,5 +46,5 @@ export function truncateNickname(fullName: string, maxLen = 32): string {
 }
 
 export function makeFullName(codeNumber: string, icName: string): string {
-    return `${codeNumber} [VES-PD] ${icName}`;
+    return `${codeNumber} ${SYSTEM_TAG} ${icName}`;
 }

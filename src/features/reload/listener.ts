@@ -1,5 +1,6 @@
 import { Client, Events, MessageFlags, ChatInputCommandInteraction } from 'discord.js';
 import { configService } from '../../core/config.service';
+import { isAdmin } from '../../services/permission.service';
 import { rateLimiter } from '../../core/ratelimiter';
 import { logger } from '../../core/logger';
 
@@ -7,7 +8,7 @@ export function setupReloadFeature(client: Client): void {
     client.on(Events.InteractionCreate, async (i) => {
         if (!i.isChatInputCommand() || i.commandName !== 'reload') return;
         const cmd = i as ChatInputCommandInteraction<'cached'>;
-        if (!cmd.memberPermissions?.has('Administrator')) {
+        if (!isAdmin(cmd)) {
             await cmd.reply({ content: '❌ เฉพาะผู้ดูแลระบบเท่านั้น', flags: MessageFlags.Ephemeral });
             return;
         }

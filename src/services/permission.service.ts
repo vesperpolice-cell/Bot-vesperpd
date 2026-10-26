@@ -1,4 +1,4 @@
-import { GuildMember, Interaction, Message } from 'discord.js';
+import { GuildMember, Interaction, Message, PermissionsBitField } from 'discord.js';
 import { configService } from '../core/config.service';
 
 /**
@@ -10,6 +10,11 @@ import { configService } from '../core/config.service';
  *   - '484012084577828875,123456789' → เฉพาะ User IDs เหล่านี้ + เจ้าของคดี
  *   - '' (ว่าง) → เฉพาะเจ้าของคดีเท่านั้น
  */
+/** ตรวจว่า interaction มาจากผู้ดูแลระบบหรือไม่ — รวมการเช็กซ้ำจากทุกคำสั่งแอดมินไว้ที่เดียว */
+export function isAdmin(interaction: { memberPermissions: Readonly<PermissionsBitField> | null }): boolean {
+    return Boolean(interaction.memberPermissions?.has('Administrator'));
+}
+
 export class PermissionService {
     /**
      * Check if user has permission to use Edit Tags.

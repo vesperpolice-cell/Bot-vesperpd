@@ -4,6 +4,7 @@ import { manualRecount } from '../count/count.service';
 import { countStates } from '../count/count.state';
 import { createPanelEmbed, buildPanelComponents } from './panel.service';
 import { replyAndDelete, silentCatch } from '../../services/utils';
+import { isAdmin } from '../../services/permission.service';
 import { buildCountModal, buildWelcomeModal, buildBypdModal, buildTake2Modal, buildRegistryModal } from './modals';
 import { logger } from '../../core/logger';
 import { resendStates } from './resend.state';
@@ -41,7 +42,7 @@ export function setupRecountFeature(client: Client): void {
         // --- /recount command ---
         if (i.isChatInputCommand() && i.commandName === 'recount') {
             const cmd = i as ChatInputCommandInteraction<'cached'>;
-            if (!cmd.memberPermissions?.has('Administrator')) {
+            if (!isAdmin(cmd)) {
                 await cmd.reply({ content: '❌ เฉพาะผู้ดูแลระบบ', flags: MessageFlags.Ephemeral });
                 return;
             }
@@ -56,7 +57,7 @@ export function setupRecountFeature(client: Client): void {
         // ------------------------------------------
         if (i.isButton() && PANEL_IDS.has(i.customId)) {
             const btn = i as ButtonInteraction<'cached'>;
-            if (!btn.memberPermissions?.has('Administrator')) {
+            if (!isAdmin(btn)) {
                 await btn.reply({ content: '❌ เฉพาะผู้ดูแลระบบ', flags: MessageFlags.Ephemeral });
                 return;
             }
@@ -154,7 +155,7 @@ export function setupRecountFeature(client: Client): void {
         // ------------------------------------------
         if (i.isModalSubmit() && PANEL_IDS.has(i.customId)) {
             const modal = i as ModalSubmitInteraction<'cached'>;
-            if (!modal.memberPermissions?.has('Administrator')) {
+            if (!isAdmin(modal)) {
                 await modal.reply({ content: '❌ เฉพาะผู้ดูแลระบบ', flags: MessageFlags.Ephemeral });
                 return;
             }

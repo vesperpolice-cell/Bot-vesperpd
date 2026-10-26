@@ -1,7 +1,7 @@
 import { Client, Events, ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder, MessageFlags, EmbedBuilder, ChatInputCommandInteraction, ModalSubmitInteraction } from 'discord.js';
 import { configService } from '../../core/config.service';
 import { findMemberByDiscordId, updateMemberName, updateMemberPhone } from '../welcome/welcome.service';
-import { truncateNickname } from '../../services/member.service';
+import { truncateNickname, makeFullName } from '../../services/member.service';
 import { logger } from '../../core/logger';
 import { silentCatch } from '../../services/utils';
 
@@ -70,7 +70,7 @@ export function setupEditPdFeature(client: Client): void {
 
                 // แก้ชื่อลง NamePD + Nickname
                 if (newName && info) {
-                    const full = `${info.codeNumber} [VES-PD] ${newName}`;
+                    const full = makeFullName(info.codeNumber, newName);
                     await updateMemberName(info.row, full);
                     try { await modal.member.setNickname(truncateNickname(full)); } catch (e) { logger.warn('EditPD', String(e)); }
                     changed.push(`ชื่อ IC → **${newName}**`);
@@ -93,7 +93,7 @@ export function setupEditPdFeature(client: Client): void {
                     if (newName) {
                         e = e.spliceFields(1, 1, { name: '📛 ชื่อ IC', value: newName, inline: true });
                         if (info) {
-                            const full = `${info.codeNumber} [VES-PD] ${newName}`;
+                            const full = makeFullName(info.codeNumber, newName);
                             e = e.spliceFields(2, 1, { name: '⚙️ ชื่อในระบบ (คัดลอกไปวางที่ Fivem ใน ⚙️Setting > Player Name ก่อนเข้าประเทศ)', value: `\`${truncateNickname(full)}\``, inline: false });
                         }
                     }
