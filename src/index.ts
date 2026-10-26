@@ -361,7 +361,9 @@ function parseLogQuery(url: URL): Parameters<typeof recent>[0] {
  */
 function handleLogs(req: http.IncomingMessage, res: http.ServerResponse): void {
     const url = new URL(req.url || '/', 'http://localhost');
-    const given = (req.headers['x-log-token'] as string | undefined) || url.searchParams.get('token') || '';
+    // รับ token ทาง header x-log-token เท่านั้น — ห้ามรับทาง query string
+    // เพราะ token ใน URL จะไปโผล่ใน access log ของ proxy/CDN (ข้อมูลรั่ว)
+    const given = (req.headers['x-log-token'] as string | undefined) || '';
 
     if (!env.logApiToken) {
         res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8' });
