@@ -50,6 +50,9 @@ export async function resolveName(src: NameSource, id: string): Promise<Resolved
 /** จำชื่อที่หามาได้ไว้ชั่วคราว — value = null คือเคยถามแล้วไม่ได้ */
 const nameCache = new Map<string, { value: ResolvedName | null; expires: number }>();
 
+/** เพดานจำนวนรายชื่อที่จำไว้ — กันหน่วยความจำบวมไม่หยุดในเซิร์ฟใหญ่ */
+const NAME_CACHE_MAX = 10000;
+
 export function displayNameOf(m: { nickname: string | null; displayName: string; user: { username: string } }): ResolvedName {
     const nick = (m.nickname || '').trim();
     return {
@@ -84,6 +87,14 @@ export async function lookupName(guild: Guild, id: string): Promise<ResolvedName
 
     const found = await resolveName(nameSourceFor(guild), id);
     const ok = Boolean(found.nickname || found.username);
+    // กัน cache โตเกินเพดาน — ไล่ทิ้งของหมดอายุก่อน ถ้ายังเกินก็ทิ้งของเก่าสุด
+    if (nameCache.size >= NAME_CACHE_MAX) {
+        pruneNameCache();
+        if (nameCache.size >= NAME_CACHE_MAX) {
+            const oldest = nameCache.keys().next().value;
+            if (oldest !== undefined) nameCache.delete(oldest);
+        }
+    }
     nameCache.set(id, {
         value: ok ? found : null,
         expires: Date.now() + (ok ? COUNT.NAME_CACHE_TTL_MS : COUNT.NAME_MISS_TTL_MS),
