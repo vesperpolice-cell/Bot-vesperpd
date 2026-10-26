@@ -16,6 +16,12 @@ services:
         sync: false
       - key: GUILD_ID
         sync: false
+      # กุญแจ Google Sheets — จำเป็น ไม่งั้นบอทอ่าน/เขียนชีตไม่ได้
+      - key: GOOGLE_JSON_KEY
+        sync: false
+      # รหัสช่อง /logs — ต้องตรงกับ BOT_LOG_TOKEN ฝั่งเว็บ
+      - key: LOG_API_TOKEN
+        sync: false
       - key: PORT
         value: "3000"
       # บนโฮสต์ไม่ต้องเขียนไฟล์ log ลงดิสก์ (หายทุก deploy) — ดูจาก Render Logs แทน
