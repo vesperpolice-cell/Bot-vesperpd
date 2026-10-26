@@ -90,6 +90,18 @@ export function countRowsToDrop(rows: string[][], maxRows: number): number {
     return data > maxRows ? data - maxRows : 0;
 }
 
+/** หมายเลขแท็บภายในจำไว้ — ไม่เปลี่ยนตอน append/deleteRow เปลี่ยนเฉพาะตอนสร้างแท็บใหม่ */
+const tabIdCache = new Map<string, number | null>();
+
+/** เอา tabId จาก cache ก่อน ถ้าไม่มีค่อยถาม Google — ลดคำขอ metadata ที่ยิงซ้ำทุกชั่วโมง */
+async function cachedTabId(tab: string): Promise<number | null> {
+    if (tabIdCache.has(tab)) return tabIdCache.get(tab) ?? null;
+    const id = await sheetService.getSheetTabId(SHEETS.CONFIG_SHEET_ID, tab);
+    tabIdCache.set(tab, id);
+    return id;
+}
+
+
 function toRow(entry: LogEntry): string[] {
     const meta = entry.meta ?? {};
     const actor = typeof meta.actor === 'string' ? meta.actor : '';
@@ -139,7 +151,10 @@ export async function flushLogSheet(): Promise<void> {
         if (!tabChecked) {
             const created = await sheetService.ensureSheetTab(SHEETS.CONFIG_SHEET_ID, SHEETS.LOG_SHEET_NAME, HEADER);
             tabChecked = true;
-            if (created) logger.info(NEVER_PERSIST, `สร้างแท็บ ${SHEETS.LOG_SHEET_NAME} ให้ใหม่แล้ว`);
+            if (created) {
+                tabIdCache.delete(SHEETS.LOG_SHEET_NAME);
+                logger.info(NEVER_PERSIST, `สร้างแท็บ ${SHEETS.LOG_SHEET_NAME} ให้ใหม่แล้ว`);
+            }
         }
         // RAW = เก็บเป็นข้อความเป๊ะ ๆ ห้ามให้ Google แปลงเวลาเป็นค่าวันที่ของมันเอง
         // ไม่งั้นอ่านกลับมาจะได้รูปแบบที่มันจัดแสดง ไม่ตรงกับที่เขียน แล้วการลบของเก่าจะพังเงียบ ๆ
@@ -170,7 +185,7 @@ async function trimLogTab(tab: string): Promise<void> {
         const drop = countRowsToDrop(rows, LOG.SHEET_MAX_ROWS);
         if (drop < 1) return;
 
-        const tabId = await sheetService.getSheetTabId(SHEETS.CONFIG_SHEET_ID, tab);
+        const tabId = await cachedTabId(tab);
         if (tabId === null) return;
 
         // index 1 = แถวที่ 2 ของชีต (ข้ามหัวตาราง) · ปลายช่วงไม่ถูกรวม
