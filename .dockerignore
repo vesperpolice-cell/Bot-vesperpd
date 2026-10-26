@@ -1,0 +1,11 @@
+node_modules
+dist
+logs
+.env
+credentials.json
+.git
+*.log
+.gitignore
+Dockerfile
+render.yaml
+src/**/*.test.ts

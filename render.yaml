@@ -1,0 +1,23 @@
+# เตรียม deploy บน Render (Blueprint)
+# ดูรายละเอียด: https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: vesper-pd-bot
+    runtime: docker
+    plan: free
+    # ใช้ "/" เพราะตอบ 200 เสมอ — ถ้าใช้ "/health" จะตอบ 503 ตอน Discord หลุด
+    # แล้ว Render อาจรีสตาร์ทวนไปมา ให้ UptimeRobot เฝ้า "/health" แทน
+    healthCheckPath: /
+    envVars:
+      # ตั้งค่าจริงใน Dashboard (sync: false = Render ไม่เขียนทับค่าที่ตั้งมือ)
+      - key: BOT_TOKEN
+        sync: false
+      - key: CLIENT_ID
+        sync: false
+      - key: GUILD_ID
+        sync: false
+      - key: PORT
+        value: "3000"
+      # บนโฮสต์ไม่ต้องเขียนไฟล์ log ลงดิสก์ (หายทุก deploy) — ดูจาก Render Logs แทน
+      - key: LOG_TO_FILE
+        value: "false"
