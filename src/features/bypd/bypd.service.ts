@@ -6,6 +6,7 @@ import { locks } from '../../core/lock.service';
 import { sleep } from '../../services/utils';
 import { createRecentSet } from '../../services/recent-set';
 import { SYSTEM_TAG } from '../../services/member.service';
+import { markProcessed } from '../../services/reactions';
 import { hasBypdInEmbed, hasPdInEmbed, hasBypdOrPdInMessage, hasCarryInMessage, hasTake2InMessage } from './bypd.utils';
 
 /** กัน process message ซ้ำ (message.id เดียว) ภายใน 60 วินาที */
@@ -260,19 +261,8 @@ export async function processBypd(message: Message): Promise<boolean> {
 
     if (count > 0) {
         // ✅ reaction แรก = บอกว่าระบบ process แล้ว (สำหรับระบบส่งย้อนหลัง)
-        try { await message.react('✅'); } catch (e) { logger.warn('BYPD', String(e)); }
-
         // อิโมจิที่ 2 = บอกจำนวนคดี (ถ้ามากกว่า 1)
-        if (count > 1) {
-            const emojiMap: Record<number, string> = {
-                2: '2️⃣', 3: '3️⃣', 4: '4️⃣', 5: '5️⃣',
-                6: '6️⃣', 7: '7️⃣', 8: '8️⃣', 9: '9️⃣', 10: '🔟',
-            };
-            const emoji = emojiMap[count];
-            if (emoji) {
-                try { await message.react(emoji); } catch (e) { logger.warn('BYPD', String(e)); }
-            }
-        }
+        await markProcessed(message, count, 'BYPD');
         let logType = '';
         if (isTake2) logType = ' (TAKE2)';
         else if (isCarry) logType = ' (อุ้มห่อ)';
