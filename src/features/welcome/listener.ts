@@ -225,7 +225,9 @@ export function setupWelcomeFeature(client: Client): void {
                 return;
             }
 
-            const preApproved = await checkPreApproved(userId);
+            // อ่านคิวรออนุมัติครั้งเดียวแล้วใช้ทั้งสองด่าน — ไม่ยิง Pending Sheet ซ้ำสองรอบต่อการกดปุ่ม
+            const pendingInfo = await checkPendingStatus(userId);
+            const preApproved = await checkPreApproved(userId, pendingInfo);
             if (preApproved.approved && preApproved.icName) {
                 await btn.editReply({ content: '✅ พบการอนุมัติ! กำลังลงทะเบียนให้...' });
                 const result = await registerMember(preApproved.icName, userId, preApproved.icPhone || '');
@@ -254,7 +256,6 @@ export function setupWelcomeFeature(client: Client): void {
                 return;
             }
 
-            const pendingInfo = await checkPendingStatus(userId);
             if (pendingInfo.found) {
                 await btn.editReply({ content: `📋 ใบสมัครของคุณ **${pendingInfo.status}** อยู่ในระบบแล้ว\n${pendingInfo.status === 'รอตรวจ' ? '⏳ กรุณารอ Admin ตรวจสอบ' : ''}` });
                 return;

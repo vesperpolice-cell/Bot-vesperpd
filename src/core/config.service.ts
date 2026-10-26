@@ -35,24 +35,7 @@ export class ConfigService {
         try {
             const ttl = bypassCache ? 0 : 30000;
             const rows = await sheetService.getValues(SHEETS.CONFIG_SHEET_ID, `${SHEETS.CONFIG_SHEET_NAME}!A:B`, ttl);
-            this.data = {};
-            for (const row of rows) { if (row[0]) this.data[row[0]] = row[1] ? row[1].trim() : ''; }
-            const parts = (this.data.COUNT_CHANNEL_IDS || '').split(',');
-            this.countConfig = { SPREADSHEET_ID: this.data.SPREADSHEET_ID || '', SHEET_NAME: this.data.SHEET_NAME || '', CHANNELS: { CHANNEL_1: (parts[0] || this.data.CHANNEL_ID_1 || '').trim(), CHANNEL_2: (parts[1] || this.data.CHANNEL_ID_2 || '').trim(), CHANNEL_3: (parts[2] || this.data.CHANNEL_ID_3 || '').trim(), CHANNEL_4: (parts[3] || this.data.CHANNEL_ID_4 || '').trim(), CHANNEL_5: (parts[4] || this.data.CHANNEL_ID_5 || '').trim() } };
-            this.registryConfig = { spreadsheetId: this.data.REGISTRY_SPREADSHEET_ID || '', sheetName: this.data.REGISTRY_SHEET_NAME || '', outSheetName: this.data.REGISTRY_OUT_SHEET_NAME || '' };
-            this.pendingSpreadsheetId = this.data.PENDING_SPREADSHEET_ID || this.data.REGISTRY_SPREADSHEET_ID || '';
-            this.pendingSheetName = this.data.PENDING_SHEET_NAME || 'Pending';
-            this.welcomeChannelId = this.data.WELCOME_CHANNEL_ID || '';
-            this.logChannelId = this.data.LOG_CHANNEL_ID || '';
-            this.logtimeChannelId = this.data.LOGTIME_CHANNEL_ID || '';
-            this.logCaseChannelId = this.data.LOGCASE_CHANNEL_ID || '';
-            this.bypdSendChannelId = this.data.BYPD_SEND_CHANNEL_ID || '';
-            this.carrySendChannelId = this.data.CARRY_SEND_CHANNEL_ID || '';
-            this.take2SendChannelId = this.data.TAKE2_SEND_CHANNEL_ID || '';
-            this.logTake2ChannelId = this.data.LOGTAKE2_CHANNEL_ID || '';
-            this.proctorSendChannelId = this.data.PROCTOR_SEND_CHANNEL_ID || '';
-            this.editTagMode = this.data.EDIT_TAG_MODE || '';
-            this.editAlertHours = parseHours(this.data.EDIT_ALERT_HOURS, COUNT.EDIT_ALERT_HOURS_DEFAULT);
+            this.applyRows(rows);
             this.loaded = true;
             logger.info('CONFIG', 'โหลด Config จาก Google Sheet สำเร็จ');
         } catch (error) {
@@ -60,6 +43,28 @@ export class ConfigService {
             this.loaded = false;
             throw error;
         }
+    }
+
+    /** แปลงแถว A:B (ที่อ่านได้ หรือที่กำลังจะเขียน) ให้เป็นค่าตั้งต้นทั้งหมด */
+    private applyRows(rows: string[][]): void {
+        this.data = {};
+        for (const row of rows) { if (row[0]) this.data[row[0]] = row[1] ? row[1].trim() : ''; }
+        const parts = (this.data.COUNT_CHANNEL_IDS || '').split(',');
+        this.countConfig = { SPREADSHEET_ID: this.data.SPREADSHEET_ID || '', SHEET_NAME: this.data.SHEET_NAME || '', CHANNELS: { CHANNEL_1: (parts[0] || this.data.CHANNEL_ID_1 || '').trim(), CHANNEL_2: (parts[1] || this.data.CHANNEL_ID_2 || '').trim(), CHANNEL_3: (parts[2] || this.data.CHANNEL_ID_3 || '').trim(), CHANNEL_4: (parts[3] || this.data.CHANNEL_ID_4 || '').trim(), CHANNEL_5: (parts[4] || this.data.CHANNEL_ID_5 || '').trim() } };
+        this.registryConfig = { spreadsheetId: this.data.REGISTRY_SPREADSHEET_ID || '', sheetName: this.data.REGISTRY_SHEET_NAME || '', outSheetName: this.data.REGISTRY_OUT_SHEET_NAME || '' };
+        this.pendingSpreadsheetId = this.data.PENDING_SPREADSHEET_ID || this.data.REGISTRY_SPREADSHEET_ID || '';
+        this.pendingSheetName = this.data.PENDING_SHEET_NAME || 'Pending';
+        this.welcomeChannelId = this.data.WELCOME_CHANNEL_ID || '';
+        this.logChannelId = this.data.LOG_CHANNEL_ID || '';
+        this.logtimeChannelId = this.data.LOGTIME_CHANNEL_ID || '';
+        this.logCaseChannelId = this.data.LOGCASE_CHANNEL_ID || '';
+        this.bypdSendChannelId = this.data.BYPD_SEND_CHANNEL_ID || '';
+        this.carrySendChannelId = this.data.CARRY_SEND_CHANNEL_ID || '';
+        this.take2SendChannelId = this.data.TAKE2_SEND_CHANNEL_ID || '';
+        this.logTake2ChannelId = this.data.LOGTAKE2_CHANNEL_ID || '';
+        this.proctorSendChannelId = this.data.PROCTOR_SEND_CHANNEL_ID || '';
+        this.editTagMode = this.data.EDIT_TAG_MODE || '';
+        this.editAlertHours = parseHours(this.data.EDIT_ALERT_HOURS, COUNT.EDIT_ALERT_HOURS_DEFAULT);
     }
 
     async reload(): Promise<void> { this.loaded = false; return this.load(true); }
@@ -85,8 +90,10 @@ export class ConfigService {
         const map = new Map<string, string>();
         for (const row of rows) { if (row[0]) map.set(row[0], row[1] || ''); }
         for (const [key, value] of updates) map.set(key, value);
-        await sheetService.updateValues(SHEETS.CONFIG_SHEET_ID, `${SHEETS.CONFIG_SHEET_NAME}!A1`, Array.from(map.entries()).map(([k, v]) => [k, v]));
-        await this.reload();
+        const nextRows = Array.from(map.entries()).map(([k, v]) => [k, v]);
+        await sheetService.updateValues(SHEETS.CONFIG_SHEET_ID, `${SHEETS.CONFIG_SHEET_NAME}!A1`, nextRows);
+        // ใช้ข้อมูลที่เพิ่งเขียนเลย แทนการ reload อ่านซ้ำ — ลด 1 คำขอต่อการตั้งค่า
+        this.applyRows(nextRows);
     }
 }
 export const configService = new ConfigService();

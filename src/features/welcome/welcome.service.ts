@@ -176,8 +176,8 @@ export async function checkPendingStatus(discordId: string): Promise<PendingEntr
 /**
  * ตรวจสอบว่า Discord ID นี้ถูก Pre-approved (ผ่าน Admin Approve ใน Pending Sheet) หรือยัง
  */
-export async function checkPreApproved(discordId: string): Promise<{ approved: boolean; icName?: string; icPhone?: string; ocAge?: string }> {
-    const result = await checkPendingStatus(discordId);
+export async function checkPreApproved(discordId: string, preFetched?: PendingEntry): Promise<{ approved: boolean; icName?: string; icPhone?: string; ocAge?: string }> {
+    const result = preFetched ?? await checkPendingStatus(discordId);
     if (result.found && result.status === 'อนุมัติ') {
         logger.info('Pre-Approved', `พบ ${discordId} ผ่านการอนุมัติแล้ว (IC: ${result.icName})`);
         return { approved: true, icName: result.icName, icPhone: result.icPhone, ocAge: result.ocAge };
@@ -262,7 +262,7 @@ export async function checkInOutDc(userId: string): Promise<boolean> {
     const reg = configService.getRegistryConfig();
     if (!reg.spreadsheetId || !reg.outSheetName) return false;
     try {
-        const rows = await sheetService.getValues(reg.spreadsheetId, `${reg.outSheetName}!E:E`, 0);
+        const rows = await sheetService.getValues(reg.spreadsheetId, `${reg.outSheetName}!E:E`, 10000);
         return columnContainsUserId(rows, userId);
     } catch {
         return false;

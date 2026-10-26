@@ -123,6 +123,7 @@ let flushing = false;
 let failures = 0;
 let skipTicks = 0;
 let tabChecked = false;
+let appendedLogRows = LOG.SHEET_MAX_ROWS; // เริ่มเท่ากับเพดาน ให้รอบแรกตรวจ/ตัดแท็บบอทจริงเสมอ
 
 /** จำนวนแถวที่ยังไม่ได้เขียนลงชีต — ใช้บอกสถานะและตอนปิดบอท */
 export function pendingLogRows(): number {
@@ -165,6 +166,7 @@ export async function flushLogSheet(): Promise<void> {
             'RAW',
         );
         failures = 0;
+        appendedLogRows += batch.length;
     } catch (err) {
         // เอากลับเข้าคิวไว้หน้าสุด ไม่ทิ้ง แล้วถอยห่างขึ้นเรื่อย ๆ
         queue = [...batch, ...queue];
@@ -204,7 +206,12 @@ async function trimLogTab(tab: string): Promise<void> {
  * ทั้งสองแท็บอยู่ไฟล์เดียวกันและบอทมีสิทธิ์เขียนอยู่แล้ว จึงทำให้ตรงนี้ทีเดียวจบ
  */
 export async function cleanupLogSheet(): Promise<void> {
-    await trimLogTab(SHEETS.LOG_SHEET_NAME);
+    // แท็บบอท: บอทเขียนเอง จึงรู้จำนวนแถวที่เพิ่งเพิ่ม — ตัดเฉพาะเมื่อเกินเพดาน ไม่ต้องอ่านชีตทุกชั่วโมง
+    if (appendedLogRows >= LOG.SHEET_MAX_ROWS) {
+        await trimLogTab(SHEETS.LOG_SHEET_NAME);
+        appendedLogRows = 0;
+    }
+    // แท็บเว็บ: บอทไม่ได้เขียนเอง ยังต้องตัดตามรอบเดิม
     await trimLogTab(SHEETS.WEB_LOG_SHEET_NAME);
 }
 
